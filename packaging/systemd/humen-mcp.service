@@ -1,0 +1,22 @@
+[Unit]
+Description=Humen MCP server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=humen-mcp
+Group=humen-mcp
+EnvironmentFile=/etc/humen-mcp.env
+Environment=HUMEN_WEB_DIST=/usr/share/humen-mcp/web
+ExecStart=/usr/bin/humen-mcp
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/humen-mcp
+WorkingDirectory=/var/lib/humen-mcp
+
+[Install]
+WantedBy=multi-user.target
