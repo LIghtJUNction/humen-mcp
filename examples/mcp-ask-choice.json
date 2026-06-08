@@ -9,8 +9,7 @@
       "title": "Pick the better label",
       "prompt": "Choose the option that reads more naturally for a checkout button.",
       "choices": ["Continue", "Proceed"],
-      "timeout_seconds": 300
+      "timeout_seconds": 60
     }
   }
 }
-

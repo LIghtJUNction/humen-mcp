@@ -28,16 +28,22 @@ The package installs:
 
 ## Configure
 
-Edit `/etc/humen-mcp.env`:
+Initialize the admin login first:
+
+```bash
+sudo humen-mcp init-admin --email <admin-email>
+```
+
+The command writes `/etc/humen-mcp.env`, generates a session secret, and prints the generated admin password. Then edit `/etc/humen-mcp.env` for the public URL:
 
 ```bash
 HUMEN_BIND=127.0.0.1:8787
 HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
-HUMEN_ADMIN_EMAIL=you@example.com
-HUMEN_ADMIN_PASSWORD=change-me
-HUMEN_SESSION_SECRET=use-a-long-random-secret
+HUMEN_ADMIN_EMAIL=<admin-email>
+HUMEN_ADMIN_PASSWORD=<generated-admin-password>
+HUMEN_SESSION_SECRET=<generated-session-secret>
 ```
 
 Only the configured admin account can use email/password login. GitHub OAuth is disabled until `HUMEN_GITHUB_CLIENT_ID` and `HUMEN_GITHUB_CLIENT_SECRET` are configured; once enabled, GitHub login is also the registration path for non-admin humans.

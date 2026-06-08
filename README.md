@@ -9,6 +9,7 @@ Human-in-the-loop MCP server. Agents call a tool named `ask_humen`; a logged-in 
 - Deployment target: reverse proxy under `https://your-domain.example/mcp`, with systemd on Arch Linux.
 - Packaging targets: `humen-mcp-git` and `humen-mcp-bin` AUR packages.
 - Presence: the web UI shows the live count of connected human workbench sessions.
+- Envelopes: every `ask_humen` call creates a pending request with `created_at`, `timeout_seconds`, and `expires_at`; expired requests move to trash.
 - Auth: admin-only email/password login; GitHub OAuth is manually enabled by configuring client credentials, and non-admin users register/login only through GitHub.
 
 ## Local Run
@@ -57,17 +58,33 @@ Example JSON-RPC payloads live in `examples/`.
   "choices": ["A", "B"],
   "image_url": "https://...",
   "steps": ["Open the site", "Read the SMS code"],
-  "timeout_seconds": 300
+  "timeout_seconds": 60
 }
 ```
+
+If `timeout_seconds` is omitted, the backend uses 60 seconds. Expired requests return JSON-RPC error code `-32001` with request data and are available from `GET /api/trash` until cleanup.
+
+## HTTP API
+
+- `GET /api/requests`
+- `GET /api/trash`
+- `POST /api/trash/clear`
+- `GET /api/ws`
 
 ## Arch Deployment
 
 Systemd and nginx examples live in `packaging/systemd` and `packaging/nginx`.
 See `docs/DEPLOYMENT.md` for the current Arch/AUR deployment checklist.
 
+After installing the AUR package, initialize the admin account before starting
+the service:
+
+```bash
+sudo humen-mcp init-admin --email <admin-email>
+```
+
 Release assets for the `-bin` package can be built with:
 
 ```bash
-scripts/package-release.sh 0.1.1
+scripts/package-release.sh 0.1.2
 ```
