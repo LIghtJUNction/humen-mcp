@@ -6,7 +6,7 @@ Human-in-the-loop MCP server. Agents call a tool named `ask_humen`; a logged-in 
 
 - Rust backend: HTTP API, WebSocket updates, MCP JSON-RPC endpoint at `/mcp`.
 - Bun web UI: `humen-mcp-webui` is kept as a git submodule.
-- Deployment target: reverse proxy under `https://humen.llm.best/mcp`, with systemd on Arch Linux.
+- Deployment target: reverse proxy under `https://your-domain.example/mcp`, with systemd on Arch Linux.
 - Packaging targets: `humen-mcp-git` and `humen-mcp-bin` AUR packages.
 - Presence: the web UI shows the live count of connected human workbench sessions.
 
@@ -32,7 +32,7 @@ Then restart `cargo run`; the backend serves the UI from `HUMEN_WEB_DIST`.
 Configure an MCP client to send streamable HTTP / JSON-RPC requests to:
 
 ```text
-https://humen.llm.best/mcp
+https://your-domain.example/mcp
 ```
 
 Implemented methods:
