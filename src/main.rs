@@ -1,5 +1,6 @@
 use std::{
     net::SocketAddr,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -74,6 +75,7 @@ struct AppState {
     requests: Arc<DashMap<Uuid, HumanRequest>>,
     waiters: Arc<DashMap<Uuid, oneshot::Sender<HumanAnswer>>>,
     sessions: Arc<DashMap<String, Session>>,
+    online_humans: Arc<AtomicUsize>,
     events: broadcast::Sender<ServerEvent>,
     http: Client,
 }
@@ -86,6 +88,7 @@ impl AppState {
             requests: Arc::new(DashMap::new()),
             waiters: Arc::new(DashMap::new()),
             sessions: Arc::new(DashMap::new()),
+            online_humans: Arc::new(AtomicUsize::new(0)),
             events,
             http: Client::new(),
         }
@@ -198,6 +201,7 @@ struct AnswerRequest {
 enum ServerEvent {
     RequestCreated { request: HumanRequest },
     RequestAnswered { id: Uuid, answer: HumanAnswer },
+    PresenceChanged { online_count: usize },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -460,6 +464,11 @@ async fn ws_handler(
 }
 
 async fn websocket(mut socket: WebSocket, state: AppState) {
+    let online_count = state.online_humans.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = state
+        .events
+        .send(ServerEvent::PresenceChanged { online_count });
+
     let initial: Vec<_> = state
         .requests
         .iter()
@@ -467,13 +476,18 @@ async fn websocket(mut socket: WebSocket, state: AppState) {
         .collect();
     if socket
         .send(Message::Text(
-            json!({ "type": "snapshot", "requests": initial })
-                .to_string()
-                .into(),
+            json!({
+                "type": "snapshot",
+                "requests": initial,
+                "online_count": online_count
+            })
+            .to_string()
+            .into(),
         ))
         .await
         .is_err()
     {
+        decrement_online(&state);
         return;
     }
 
@@ -503,6 +517,16 @@ async fn websocket(mut socket: WebSocket, state: AppState) {
             }
         }
     }
+
+    decrement_online(&state);
+}
+
+fn decrement_online(state: &AppState) {
+    let previous = state.online_humans.fetch_sub(1, Ordering::SeqCst);
+    let online_count = previous.saturating_sub(1);
+    let _ = state
+        .events
+        .send(ServerEvent::PresenceChanged { online_count });
 }
 
 async fn mcp(
