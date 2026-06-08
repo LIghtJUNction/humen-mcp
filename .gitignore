@@ -1,4 +1,5 @@
 /target
+/dist-release
 /.env
 /.env.*
 !/env.example
@@ -6,4 +7,3 @@
 *.pid
 *.swp
 *.tmp
-

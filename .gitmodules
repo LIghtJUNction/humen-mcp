@@ -1,6 +1,9 @@
 [submodule "humen-mcp-webui"]
 	path = humen-mcp-webui
 	url = https://github.com/LIghtJUNction/humen-mcp-webui.git
+[submodule "aur/humen-mcp-bin"]
+	path = aur/humen-mcp-bin
+	url = ssh://aur@aur.archlinux.org/humen-mcp-bin.git
 [submodule "aur/humen-mcp-git"]
 	path = aur/humen-mcp-git
 	url = ssh://aur@aur.archlinux.org/humen-mcp-git.git

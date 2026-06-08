@@ -12,6 +12,11 @@ paru -S humen-mcp-git
 paru -S humen-mcp-bin
 ```
 
+Repository submodules:
+
+- `aur/humen-mcp-git`: source package, builds the Rust backend and Bun web UI.
+- `aur/humen-mcp-bin`: binary package, installs the GitHub Release tarball.
+
 The package installs:
 
 - `/usr/bin/humen-mcp`
