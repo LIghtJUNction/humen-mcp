@@ -9,6 +9,7 @@ Human-in-the-loop MCP server. Agents call a tool named `ask_humen`; a logged-in 
 - Deployment target: reverse proxy under `https://your-domain.example/mcp`, with systemd on Arch Linux.
 - Packaging targets: `humen-mcp-git` and `humen-mcp-bin` AUR packages.
 - Presence: the web UI shows the live count of connected human workbench sessions.
+- Auth: admin-only email/password login; GitHub OAuth is manually enabled by configuring client credentials, and non-admin users register/login only through GitHub.
 
 ## Local Run
 
@@ -34,6 +35,8 @@ Configure an MCP client to send streamable HTTP / JSON-RPC requests to:
 ```text
 https://your-domain.example/mcp
 ```
+
+`POST /mcp` is the MCP JSON-RPC endpoint. `GET /mcp` is intentionally not the web UI; the human workbench is served at `/mcp/`.
 
 Implemented methods:
 
@@ -66,5 +69,5 @@ See `docs/DEPLOYMENT.md` for the current Arch/AUR deployment checklist.
 Release assets for the `-bin` package can be built with:
 
 ```bash
-scripts/package-release.sh 0.1.0
+scripts/package-release.sh 0.1.1
 ```

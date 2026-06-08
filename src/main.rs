@@ -1,7 +1,10 @@
 use std::{
+    collections::HashMap,
+    fs,
     net::SocketAddr,
+    path::PathBuf,
     sync::atomic::{AtomicUsize, Ordering},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,7 +15,7 @@ use axum::{
         Path, Query, State,
     },
     http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Redirect},
+    response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -49,6 +52,13 @@ struct Config {
     #[arg(long, env = "HUMEN_WEB_DIST", default_value = "./humen-mcp-webui/dist")]
     web_dist: String,
 
+    #[arg(
+        long,
+        env = "HUMEN_USERS_FILE",
+        default_value = "./humen-mcp-users.json"
+    )]
+    users_file: PathBuf,
+
     #[arg(long, env = "HUMEN_ADMIN_EMAIL", default_value = "admin@example.com")]
     admin_email: String,
 
@@ -75,23 +85,26 @@ struct AppState {
     requests: Arc<DashMap<Uuid, HumanRequest>>,
     waiters: Arc<DashMap<Uuid, oneshot::Sender<HumanAnswer>>>,
     sessions: Arc<DashMap<String, Session>>,
+    users: Arc<Mutex<UserStore>>,
     online_humans: Arc<AtomicUsize>,
     events: broadcast::Sender<ServerEvent>,
     http: Client,
 }
 
 impl AppState {
-    fn new(config: Config) -> Self {
+    fn new(config: Config) -> anyhow::Result<Self> {
         let (events, _) = broadcast::channel(128);
-        Self {
+        let users = UserStore::load(&config.users_file)?;
+        Ok(Self {
             config: Arc::new(config),
             requests: Arc::new(DashMap::new()),
             waiters: Arc::new(DashMap::new()),
             sessions: Arc::new(DashMap::new()),
+            users: Arc::new(Mutex::new(users)),
             online_humans: Arc::new(AtomicUsize::new(0)),
             events,
             http: Client::new(),
-        }
+        })
     }
 
     fn create_session(&self, email: impl Into<String>, provider: AuthProvider) -> AuthResponse {
@@ -136,6 +149,11 @@ impl AppState {
         hasher.update(b":");
         hasher.update(token.as_bytes());
         format!("{:x}", hasher.finalize())
+    }
+
+    fn github_enabled(&self) -> bool {
+        non_empty(self.config.github_client_id.as_deref())
+            && non_empty(self.config.github_client_secret.as_deref())
     }
 }
 
@@ -236,6 +254,48 @@ struct AuthResponse {
     user: User,
 }
 
+#[derive(Debug, Serialize)]
+struct AuthConfigResponse {
+    github_enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct UserRecord {
+    email: String,
+    #[serde(default)]
+    created_at: u64,
+    #[serde(default)]
+    last_login_at: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct UserStore {
+    #[serde(default)]
+    users: HashMap<String, UserRecord>,
+}
+
+impl UserStore {
+    fn load(path: &PathBuf) -> anyhow::Result<Self> {
+        match fs::read_to_string(path) {
+            Ok(raw) => serde_json::from_str(&raw).context("parse users file"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(err) => Err(err).context("read users file"),
+        }
+    }
+
+    fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).context("create users file directory")?;
+        }
+        let raw = serde_json::to_string_pretty(self).context("serialize users file")?;
+        fs::write(path, raw).context("write users file")
+    }
+
+    fn insert(&mut self, record: UserRecord) {
+        self.users.insert(normalize_email(&record.email), record);
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct McpRequest {
     jsonrpc: Option<String>,
@@ -264,11 +324,12 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::parse();
     let bind = config.bind;
     let web_dist = config.web_dist.clone();
-    let state = AppState::new(config);
+    let state = AppState::new(config)?;
 
     let app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/mcp", post(mcp))
+        .route("/mcp", get(mcp_get).post(mcp))
+        .route("/api/auth/config", get(auth_config))
         .route("/api/auth/login", post(login))
         .route("/api/auth/oauth/github/start", get(github_oauth_start))
         .route(
@@ -307,20 +368,56 @@ async fn healthz() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
 
+async fn mcp_get() -> Response {
+    (
+        StatusCode::METHOD_NOT_ALLOWED,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        "humen-mcp JSON-RPC endpoint. Use POST /mcp with application/json.\n",
+    )
+        .into_response()
+}
+
+async fn auth_config(State(state): State<AppState>) -> Json<AuthConfigResponse> {
+    Json(AuthConfigResponse {
+        github_enabled: state.github_enabled(),
+    })
+}
+
 async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>, ApiError> {
-    if payload.email == state.config.admin_email && payload.pass == state.config.admin_password {
+    if let Some(user) = authenticate_password(&state, &payload.email, &payload.pass)? {
         Ok(Json(
-            state.create_session(payload.email, AuthProvider::Password),
+            state.create_session(user.email, AuthProvider::Password),
         ))
     } else {
         Err(ApiError::unauthorized("invalid email or password"))
     }
 }
 
+fn authenticate_password(
+    state: &AppState,
+    email: &str,
+    pass: &str,
+) -> Result<Option<User>, ApiError> {
+    let normalized = normalize_email(email);
+    if normalized == normalize_email(&state.config.admin_email)
+        && pass == state.config.admin_password
+    {
+        return Ok(Some(User {
+            email: state.config.admin_email.clone(),
+            provider: AuthProvider::Password,
+        }));
+    }
+
+    Ok(None)
+}
+
 async fn github_oauth_start(State(state): State<AppState>) -> Result<Redirect, ApiError> {
+    if !state.github_enabled() {
+        return Err(ApiError::bad_request("GitHub OAuth is not configured"));
+    }
     let client_id = state
         .config
         .github_client_id
@@ -340,6 +437,9 @@ async fn github_oauth_callback(
     State(state): State<AppState>,
     Query(query): Query<OAuthCallback>,
 ) -> Result<Redirect, ApiError> {
+    if !state.github_enabled() {
+        return Err(ApiError::bad_request("GitHub OAuth is not configured"));
+    }
     let client_id = state
         .config
         .github_client_id
@@ -389,6 +489,8 @@ async fn github_oauth_callback(
         .and_then(Value::as_str)
         .or_else(|| user.get("login").and_then(Value::as_str))
         .ok_or_else(|| ApiError::upstream("GitHub user response had no email or login"))?;
+    let email = normalize_email(email);
+    upsert_github_user(&state, &email)?;
     let auth = state.create_session(email, AuthProvider::Github);
     let redirect = format!(
         "{}/?token={}",
@@ -676,6 +778,43 @@ fn require_session(state: &AppState, headers: &HeaderMap) -> Result<Session, Api
         .ok_or_else(|| ApiError::unauthorized("missing or invalid bearer token"))
 }
 
+fn upsert_github_user(state: &AppState, email: &str) -> Result<(), ApiError> {
+    validate_email_like_identifier(email)?;
+    let mut users = state
+        .users
+        .lock()
+        .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    let now = now_unix();
+    if let Some(record) = users.users.get_mut(email) {
+        record.last_login_at = now;
+    } else {
+        users.insert(UserRecord {
+            email: email.to_string(),
+            created_at: now,
+            last_login_at: now,
+        });
+    }
+    users
+        .save(&state.config.users_file)
+        .map_err(|err| ApiError::internal(format!("failed to save GitHub user: {err}")))?;
+    Ok(())
+}
+
+fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+fn validate_email_like_identifier(email: &str) -> Result<(), ApiError> {
+    if email.len() < 2 || email.contains(char::is_whitespace) {
+        return Err(ApiError::bad_request("valid GitHub identity is required"));
+    }
+    Ok(())
+}
+
+fn non_empty(value: Option<&str>) -> bool {
+    value.is_some_and(|value| !value.trim().is_empty())
+}
+
 fn mcp_error(id: Option<Value>, code: i64, message: impl Into<String>) -> Value {
     json!({
         "jsonrpc": "2.0",
@@ -749,6 +888,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -766,12 +912,15 @@ mod tests {
             bind: "127.0.0.1:0".parse().unwrap(),
             public_base_url: "http://127.0.0.1:8787".to_string(),
             web_dist: "./humen-mcp-webui/dist".to_string(),
+            users_file: std::env::temp_dir()
+                .join(format!("humen-mcp-test-{}.json", Uuid::new_v4())),
             admin_email: "admin@example.com".to_string(),
             admin_password: "secret".to_string(),
             session_secret: "test-session-secret".to_string(),
             github_client_id: None,
             github_client_secret: None,
         })
+        .unwrap()
     }
 
     #[test]
