@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "ask_humen",
+    "arguments": {
+      "kind": "choice",
+      "title": "Pick the better label",
+      "prompt": "Choose the option that reads more naturally for a checkout button.",
+      "choices": ["Continue", "Proceed"],
+      "timeout_seconds": 300
+    }
+  }
+}
+

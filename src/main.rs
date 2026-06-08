@@ -464,10 +464,7 @@ async fn ws_handler(
 }
 
 async fn websocket(mut socket: WebSocket, state: AppState) {
-    let online_count = state.online_humans.fetch_add(1, Ordering::SeqCst) + 1;
-    let _ = state
-        .events
-        .send(ServerEvent::PresenceChanged { online_count });
+    let online_count = increment_online(&state);
 
     let initial: Vec<_> = state
         .requests
@@ -522,11 +519,24 @@ async fn websocket(mut socket: WebSocket, state: AppState) {
 }
 
 fn decrement_online(state: &AppState) {
-    let previous = state.online_humans.fetch_sub(1, Ordering::SeqCst);
+    let previous = state
+        .online_humans
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            Some(count.saturating_sub(1))
+        })
+        .unwrap_or(0);
     let online_count = previous.saturating_sub(1);
     let _ = state
         .events
         .send(ServerEvent::PresenceChanged { online_count });
+}
+
+fn increment_online(state: &AppState) -> usize {
+    let online_count = state.online_humans.fetch_add(1, Ordering::SeqCst) + 1;
+    let _ = state
+        .events
+        .send(ServerEvent::PresenceChanged { online_count });
+    online_count
 }
 
 async fn mcp(
@@ -744,5 +754,59 @@ impl ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> axum::response::Response {
         (self.status, Json(json!({ "error": self.message }))).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_state() -> AppState {
+        AppState::new(Config {
+            bind: "127.0.0.1:0".parse().unwrap(),
+            public_base_url: "http://127.0.0.1:8787".to_string(),
+            web_dist: "./humen-mcp-webui/dist".to_string(),
+            admin_email: "admin@example.com".to_string(),
+            admin_password: "secret".to_string(),
+            session_secret: "test-session-secret".to_string(),
+            github_client_id: None,
+            github_client_secret: None,
+        })
+    }
+
+    #[test]
+    fn ask_humen_schema_exposes_simple_task_kinds() {
+        let schema = ask_humen_schema();
+        let kinds = schema["properties"]["kind"]["enum"].as_array().unwrap();
+        assert!(kinds.contains(&json!("choice")));
+        assert!(kinds.contains(&json!("text")));
+        assert!(kinds.contains(&json!("image_review")));
+        assert!(kinds.contains(&json!("steps")));
+    }
+
+    #[test]
+    fn bearer_session_round_trips() {
+        let state = test_state();
+        let auth = state.create_session("admin@example.com", AuthProvider::Password);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", auth.token).parse().unwrap(),
+        );
+
+        let session = state.session_from_headers(&headers).unwrap();
+
+        assert_eq!(session.user.email, "admin@example.com");
+        assert!(state.session_from_token("not-a-token").is_none());
+    }
+
+    #[test]
+    fn online_count_saturates_on_extra_disconnects() {
+        let state = test_state();
+        assert_eq!(increment_online(&state), 1);
+        decrement_online(&state);
+        decrement_online(&state);
+
+        assert_eq!(state.online_humans.load(Ordering::SeqCst), 0);
     }
 }

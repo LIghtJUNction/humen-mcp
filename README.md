@@ -8,6 +8,7 @@ Human-in-the-loop MCP server. Agents call a tool named `ask_humen`; a logged-in 
 - Bun web UI: `humen-mcp-webui` is kept as a git submodule.
 - Deployment target: reverse proxy under `https://xxx.yyy/mcp`, with systemd on Arch Linux.
 - Packaging target: `humen-mcp-git` AUR package.
+- Presence: the web UI shows the live count of connected human workbench sessions.
 
 ## Local Run
 
@@ -41,6 +42,8 @@ Implemented methods:
 - `tools/list`
 - `tools/call` with tool `ask_humen`
 
+Example JSON-RPC payloads live in `examples/`.
+
 `ask_humen` accepts:
 
 ```json
@@ -58,4 +61,4 @@ Implemented methods:
 ## Arch Deployment
 
 Systemd and nginx examples live in `packaging/systemd` and `packaging/nginx`.
-
+See `docs/DEPLOYMENT.md` for the current Arch/AUR deployment checklist.
