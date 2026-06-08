@@ -7,7 +7,7 @@ Human-in-the-loop MCP server. Agents call a tool named `ask_humen`; a logged-in 
 - Rust backend: HTTP API, WebSocket updates, MCP JSON-RPC endpoint at `/mcp`.
 - Bun web UI: `humen-mcp-webui` is kept as a git submodule.
 - Deployment target: reverse proxy under `https://xxx.yyy/mcp`, with systemd on Arch Linux.
-- Packaging target: `humen-mcp-git` AUR package.
+- Packaging targets: `humen-mcp-git` and `humen-mcp-bin` AUR packages.
 - Presence: the web UI shows the live count of connected human workbench sessions.
 
 ## Local Run
@@ -62,3 +62,9 @@ Example JSON-RPC payloads live in `examples/`.
 
 Systemd and nginx examples live in `packaging/systemd` and `packaging/nginx`.
 See `docs/DEPLOYMENT.md` for the current Arch/AUR deployment checklist.
+
+Release assets for the `-bin` package can be built with:
+
+```bash
+scripts/package-release.sh 0.1.0
+```

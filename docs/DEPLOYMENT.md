@@ -4,10 +4,12 @@ Target: Arch Linux server `archczy`, served under `https://xxx.yyy/mcp`.
 
 ## Package
 
-The AUR package is `humen-mcp-git`.
+The source AUR package is `humen-mcp-git`; the binary package is `humen-mcp-bin`.
 
 ```bash
 paru -S humen-mcp-git
+# or
+paru -S humen-mcp-bin
 ```
 
 The package installs:
@@ -58,4 +60,3 @@ curl -s http://127.0.0.1:8787/mcp \
 ```
 
 Open `https://xxx.yyy/mcp/`, log in, and confirm the sidebar shows the live online count.
-
