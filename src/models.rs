@@ -80,6 +80,8 @@ struct AnsweredRequest {
 #[derive(Clone, Debug, Serialize)]
 struct HumanLeaderboardEntry {
     email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    login: Option<String>,
     requests_handled: u64,
     sent_tokens: u64,
     latest_answered_at: Option<u64>,
@@ -218,6 +220,8 @@ struct LateHumanReply {
 #[derive(Clone, Debug, Serialize)]
 struct PublicUserProfile {
     email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    login: Option<String>,
     provider: AuthProvider,
     profile: String,
     tags: Vec<String>,
@@ -226,6 +230,7 @@ struct PublicUserProfile {
     reputation_breakdown: ReputationBreakdown,
     friend_code: String,
     intro_code: String,
+    visibility: ProfileVisibility,
     is_public: bool,
     is_friend: bool,
     friend_request_sent: bool,
@@ -653,6 +658,8 @@ struct ProfileUpdate {
     profile: String,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    visibility: Option<ProfileVisibility>,
     is_public: Option<bool>,
     onboarding_completed: Option<bool>,
 }
@@ -730,6 +737,10 @@ struct AdminUserUpdate {
 struct UserRecord {
     email: String,
     #[serde(default)]
+    login: Option<String>,
+    #[serde(default)]
+    github_id: Option<String>,
+    #[serde(default)]
     created_at: u64,
     #[serde(default)]
     last_login_at: u64,
@@ -741,6 +752,8 @@ struct UserRecord {
     agent_secret: Option<String>,
     #[serde(default)]
     intro_code: String,
+    #[serde(default)]
+    visibility: ProfileVisibility,
     #[serde(default)]
     is_public: bool,
     #[serde(default)]
@@ -757,6 +770,16 @@ struct UserRecord {
     passkey_user_id: Option<Uuid>,
     #[serde(default)]
     passkeys: Vec<StoredPasskey>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum ProfileVisibility {
+    #[default]
+    Private,
+    Friends,
+    Agents,
+    Public,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -794,7 +817,9 @@ impl UserStore {
     }
 
     fn insert(&mut self, record: UserRecord) {
-        self.users.insert(normalize_email(&record.email), record);
+        let mut record = record;
+        prepare_user_record(&mut record);
+        self.users.insert(user_record_key(&record), record);
     }
 }
 
@@ -804,10 +829,13 @@ fn new_user_record(email: impl Into<String>, now: u64, profile: impl Into<String
         email,
         created_at: now,
         last_login_at: now,
+        login: None,
+        github_id: None,
         profile: profile.into(),
         tags: Vec::new(),
         agent_secret: Some(random_secret(24)),
         intro_code: random_intro_code(),
+        visibility: ProfileVisibility::Private,
         is_public: false,
         friends: Vec::new(),
         friend_requests: Vec::new(),
@@ -821,6 +849,22 @@ fn new_user_record(email: impl Into<String>, now: u64, profile: impl Into<String
 
 fn prepare_user_record(record: &mut UserRecord) {
     record.email = normalize_email(&record.email);
+    record.login = record
+        .login
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    record.github_id = record
+        .github_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if record.is_public && record.visibility == ProfileVisibility::Private {
+        record.visibility = ProfileVisibility::Public;
+    }
+    record.is_public = record.visibility == ProfileVisibility::Public;
     if normalize_optional_value(record.agent_secret.as_deref()).is_none() {
         record.agent_secret = Some(random_secret(24));
     }
@@ -836,6 +880,14 @@ fn prepare_user_record(record: &mut UserRecord) {
             }
         }
     }
+}
+
+fn user_record_key(record: &UserRecord) -> String {
+    record
+        .github_id
+        .as_deref()
+        .map(github_identity_key)
+        .unwrap_or_else(|| normalize_email(&record.email))
 }
 
 fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {

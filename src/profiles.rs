@@ -63,19 +63,62 @@ fn ensure_user_allowed(state: &AppState, email: &str) -> Result<(), ApiError> {
         {
             return Err(ApiError::unauthorized("user is banned"));
         }
+    } else if let Some(record) = users
+        .users
+        .values()
+        .find(|record| normalize_email(&record.email) == normalize_email(email))
+    {
+        if record
+            .ban_expires_at
+            .is_some_and(|expires_at| expires_at > now_unix())
+        {
+            return Err(ApiError::unauthorized("user is banned"));
+        }
     }
     Ok(())
 }
 
-fn upsert_github_user(state: &AppState, email: &str) -> Result<(), ApiError> {
+fn upsert_github_user(
+    state: &AppState,
+    github_id: &str,
+    login: Option<&str>,
+    email: &str,
+) -> Result<String, ApiError> {
     validate_email_like_identifier(email)?;
+    let account_key = github_identity_key(github_id);
+    let login = login.and_then(|value| normalize_optional_value(Some(value)));
+    let legacy_email_key = normalize_email(email);
+    let legacy_login_key = login.as_deref().map(normalize_email);
     let mut users = state
         .users
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
     let now = now_unix();
-    if let Some(record) = users.users.get_mut(email) {
+    let existing_key = if users.users.contains_key(&account_key) {
+        Some(account_key.clone())
+    } else if users.users.contains_key(&legacy_email_key) {
+        Some(legacy_email_key)
+    } else {
+        legacy_login_key
+            .as_ref()
+            .filter(|key| users.users.contains_key(*key))
+            .cloned()
+    };
+
+    if let Some(existing_key) = existing_key {
+        if existing_key != account_key {
+            if let Some(record) = users.users.remove(&existing_key) {
+                users.users.insert(account_key.clone(), record);
+            }
+        }
+        let record = users
+            .users
+            .get_mut(&account_key)
+            .ok_or_else(|| ApiError::internal("failed to migrate GitHub user"))?;
         prepare_user_record(record);
+        record.github_id = Some(github_id.trim().to_string());
+        record.login = login;
+        record.email = normalize_email(email);
         record.last_login_at = now;
     } else {
         let allow_registration = state
@@ -86,12 +129,15 @@ fn upsert_github_user(state: &AppState, email: &str) -> Result<(), ApiError> {
         if !allow_registration {
             return Err(ApiError::unauthorized("new user registration is disabled"));
         }
-        users.insert(new_user_record(email.to_string(), now, String::new()));
+        let mut record = new_user_record(email.to_string(), now, String::new());
+        record.github_id = Some(github_id.trim().to_string());
+        record.login = login;
+        users.users.insert(account_key.clone(), record);
     }
     users
         .save(&state.config.users_file)
         .map_err(|err| ApiError::internal(format!("failed to save GitHub user: {err}")))?;
-    Ok(())
+    Ok(account_key)
 }
 
 fn user_profiles(
@@ -180,7 +226,7 @@ fn visible_user_profiles_for_session(
         .filter(|record| {
             let email = normalize_email(&record.email);
             email == viewer_email
-                || record.is_public
+                || record.visibility == ProfileVisibility::Public
                 || friends.iter().any(|friend| friend == &email)
         })
         .map(|record| {
@@ -279,9 +325,18 @@ fn agent_can_see_record(
     match agent.directory_visibility {
         AgentDirectoryVisibility::SelfOnly => false,
         AgentDirectoryVisibility::SelfAndFriends => friends.iter().any(|friend| friend == &email),
-        AgentDirectoryVisibility::PublicUsers => record.is_public,
-        AgentDirectoryVisibility::ReputationAtLeast => record.is_public && reputation >= min_reputation,
+        AgentDirectoryVisibility::PublicUsers => profile_visible_to_agents(record),
+        AgentDirectoryVisibility::ReputationAtLeast => {
+            profile_visible_to_agents(record) && reputation >= min_reputation
+        }
     }
+}
+
+fn profile_visible_to_agents(record: &UserRecord) -> bool {
+    matches!(
+        record.visibility,
+        ProfileVisibility::Public | ProfileVisibility::Agents
+    )
 }
 
 fn visible_tag_counts_for_session(
@@ -342,7 +397,7 @@ fn get_or_create_user_record(state: &AppState, email: &str) -> Result<UserRecord
 fn ensure_user_agent_fields(
     state: &AppState,
     email: &str,
-) -> Result<(String, String, bool, bool), ApiError> {
+) -> Result<(String, String, ProfileVisibility, bool), ApiError> {
     let email = normalize_email(email);
     let mut users = state
         .users
@@ -356,12 +411,12 @@ fn ensure_user_agent_fields(
     prepare_user_record(record);
     let suffix = record.agent_secret.clone().unwrap_or_default();
     let intro_code = record.intro_code.clone();
-    let is_public = record.is_public;
+    let visibility = record.visibility;
     let onboarding_completed = record.onboarding_completed;
     users
         .save(&state.config.users_file)
         .map_err(|err| ApiError::internal(format!("failed to save user agent fields: {err}")))?;
-    Ok((suffix, intro_code, is_public, onboarding_completed))
+    Ok((suffix, intro_code, visibility, onboarding_completed))
 }
 
 fn public_profile_from_record(state: &AppState, record: &UserRecord) -> PublicUserProfile {
@@ -391,6 +446,7 @@ fn public_profile_from_record_with_online_and_reputation(
     };
     PublicUserProfile {
         email: record.email.clone(),
+        login: record.login.clone(),
         provider,
         profile: record.profile.clone(),
         tags: public_tags_for_record(record, is_admin),
@@ -399,7 +455,8 @@ fn public_profile_from_record_with_online_and_reputation(
         reputation_breakdown: reputation.reputation_breakdown,
         friend_code: record.intro_code.clone(),
         intro_code: record.intro_code.clone(),
-        is_public: record.is_public,
+        visibility: record.visibility,
+        is_public: record.visibility == ProfileVisibility::Public,
         is_friend: false,
         friend_request_sent: false,
         friend_request_received: false,
@@ -461,6 +518,7 @@ fn synthetic_admin_profile(
 ) -> PublicUserProfile {
     PublicUserProfile {
         email: state.config.admin_email.clone(),
+        login: None,
         provider: AuthProvider::Password,
         profile: "Administrator".to_string(),
         tags: vec![ADMIN_TAG.to_string()],
@@ -469,6 +527,7 @@ fn synthetic_admin_profile(
         reputation_breakdown: reputation.reputation_breakdown,
         friend_code: String::new(),
         intro_code: String::new(),
+        visibility: ProfileVisibility::Private,
         is_public: false,
         is_friend: false,
         friend_request_sent: false,

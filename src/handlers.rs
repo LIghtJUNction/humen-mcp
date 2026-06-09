@@ -84,6 +84,7 @@ fn leaderboard_entries_for_profiles(
             let stat = stats_by_email.remove(&normalize_email(&profile.email));
             HumanLeaderboardEntry {
             email: profile.email.clone(),
+                login: profile.login.clone(),
                 requests_handled: stat.as_ref().map(|stat| stat.requests_handled).unwrap_or(0),
                 sent_tokens: stat.as_ref().map(|stat| stat.sent_tokens).unwrap_or(0),
                 latest_answered_at: stat.and_then(|stat| stat.latest_answered_at),

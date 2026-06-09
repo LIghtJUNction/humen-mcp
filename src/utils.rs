@@ -134,6 +134,10 @@ fn validate_email_like_identifier(email: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+fn github_identity_key(id: &str) -> String {
+    format!("github:{}", id.trim())
+}
+
 fn non_empty(value: Option<&str>) -> bool {
     value.is_some_and(|value| !value.trim().is_empty())
 }

@@ -263,7 +263,7 @@ fn store_passkey(
     prepare_user_record(record);
     record.passkeys.push(StoredPasskey {
         id: Uuid::new_v4(),
-        name: normalize_optional_value(name).unwrap_or_else(|| "Passkey".to_string()),
+        name: normalize_optional_value(name).unwrap_or_else(|| default_passkey_name(record)),
         created_at: now_unix(),
         last_used_at: None,
         credential: passkey,
@@ -323,6 +323,11 @@ fn passkey_display_name(record: &UserRecord) -> String {
         .filter(|value| !value.is_empty())
         .unwrap_or(&record.email)
         .to_string()
+}
+
+fn default_passkey_name(record: &UserRecord) -> String {
+    let next = record.passkeys.len() + 1;
+    format!("{} Passkey {next}", passkey_display_name(record))
 }
 
 fn passkey_info(passkey: &StoredPasskey) -> PasskeyInfo {

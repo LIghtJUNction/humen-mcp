@@ -95,23 +95,37 @@ async fn github_oauth_callback(
         .await
         .map_err(|err| ApiError::upstream(format!("GitHub user response was invalid: {err}")))?;
 
+    let github_id = user
+        .get("id")
+        .and_then(Value::as_u64)
+        .map(|id| id.to_string())
+        .or_else(|| {
+            user.get("node_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .ok_or_else(|| ApiError::upstream("GitHub user response had no stable id"))?;
+    let login = user
+        .get("login")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     let email = user
         .get("email")
         .and_then(Value::as_str)
         .or_else(|| user.get("login").and_then(Value::as_str))
         .ok_or_else(|| ApiError::upstream("GitHub user response had no email or login"))?;
     let email = normalize_email(email);
-    upsert_github_user(&state, &email)?;
+    let account_key = upsert_github_user(&state, &github_id, login.as_deref(), &email)?;
     match github_reputation_seed_for_oauth_user(&state, &user, access_token).await {
         Ok(seed) => {
-            db_upsert_reputation_seed(&state, &email, github_seed_as_reputation_seed(&seed))?;
+            db_upsert_reputation_seed(&state, &account_key, github_seed_as_reputation_seed(&seed))?;
         }
         Err(err) => {
-            warn!(email, error = %err.message, "failed to compute GitHub reputation seed");
+            warn!(email, github_id, error = %err.message, "failed to compute GitHub reputation seed");
         }
     }
-    ensure_user_allowed(&state, &email)?;
-    let auth = state.create_session(email, AuthProvider::Github);
+    ensure_user_allowed(&state, &account_key)?;
+    let auth = state.create_session(account_key, AuthProvider::Github);
     let redirect = format!(
         "{}/?token={}",
         state.config.public_base_url.trim_end_matches('/'),
@@ -159,9 +173,16 @@ async fn update_me_profile(
         prepare_user_record(record);
         record.profile = payload.profile;
         record.tags = normalize_tags(payload.tags);
-        if let Some(is_public) = payload.is_public {
-            record.is_public = is_public;
+        if let Some(visibility) = payload.visibility {
+            record.visibility = visibility;
+        } else if let Some(is_public) = payload.is_public {
+            record.visibility = if is_public {
+                ProfileVisibility::Public
+            } else {
+                ProfileVisibility::Private
+            };
         }
+        record.is_public = record.visibility == ProfileVisibility::Public;
         if let Some(onboarding_completed) = payload.onboarding_completed {
             record.onboarding_completed = onboarding_completed;
         }
@@ -186,7 +207,7 @@ async fn agent_access(
         .clone();
     let prefix = normalize_optional_value(settings.agent_secret_prefix.as_deref())
         .ok_or_else(|| ApiError::internal("agent secret prefix is not configured"))?;
-    let (suffix, intro_code, is_public, onboarding_completed) =
+    let (suffix, intro_code, visibility, onboarding_completed) =
         ensure_user_agent_fields(&state, &session.user.email)?;
     let mcp_url = mcp_public_url(&state.config.public_base_url);
     Ok(Json(json!({
@@ -201,7 +222,8 @@ async fn agent_access(
         "agent_directory_min_reputation": settings.agent_directory_min_reputation,
         "friend_code": intro_code.clone(),
         "intro_code": intro_code,
-        "is_public": is_public,
+        "visibility": visibility,
+        "is_public": visibility == ProfileVisibility::Public,
         "onboarding_completed": onboarding_completed
     })))
 }
