@@ -54,6 +54,68 @@ mod tests {
     }
 
     #[test]
+    fn report_and_rating_schemas_expose_public_interfaces() {
+        let rating_schema = rate_humen_schema();
+        assert_eq!(rating_schema["required"], json!(["rated_email", "score"]));
+        assert_eq!(rating_schema["properties"]["score"]["minimum"], json!(0));
+        assert_eq!(rating_schema["properties"]["score"]["maximum"], json!(10));
+
+        let report_schema = report_humen_schema();
+        assert_eq!(report_schema["required"], json!(["reported_email", "reason"]));
+        assert!(report_schema["properties"].get("reported_email").is_some());
+        assert!(report_schema["properties"].get("reason").is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_tools_list_exposes_report_and_rating_tools() {
+        let state = test_state();
+        {
+            let mut settings = state.admin_settings.lock().unwrap();
+            settings.agent_secret_prefix = Some("prefix-".to_string());
+        }
+        {
+            let mut users = state.users.lock().unwrap();
+            users.admin_settings.agent_secret_prefix = Some("prefix-".to_string());
+            let mut alice = new_user_record("alice@example.com", 1, "Alice");
+            alice.agent_secret = Some("alice-secret-123".to_string());
+            users.insert(alice);
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-humen-agent-secret",
+            "prefix-alice-secret-123".parse().unwrap(),
+        );
+        let response = mcp(
+            State(state),
+            headers,
+            Json(McpRequest {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: "tools/list".to_string(),
+                params: Value::Null,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        let tool_names: Vec<_> = payload["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect();
+
+        assert!(tool_names.contains(&"rate_humen"));
+        assert!(tool_names.contains(&"report_humen"));
+    }
+
+    #[test]
     fn judgment_requests_use_fixed_yes_no_choices() {
         assert_eq!(
             normalize_request_choices(
@@ -268,6 +330,7 @@ mod tests {
             let mut settings = state.admin_settings.lock().unwrap();
             settings.agent_secret_prefix = Some("prefix-".to_string());
             settings.allow_agent_directory = true;
+            settings.agent_directory_visibility = AgentDirectoryVisibility::PublicUsers;
         }
         {
             let mut users = state.users.lock().unwrap();
@@ -292,7 +355,88 @@ mod tests {
         let agent = require_agent_access(&state, &headers).unwrap();
 
         assert_eq!(agent.email, "alice@example.com");
-        assert!(agent.can_view_directory);
+        assert_eq!(
+            agent.directory_visibility,
+            AgentDirectoryVisibility::PublicUsers
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            "Bearer prefix-alice-secret-123".parse().unwrap(),
+        );
+        let agent = require_agent_access(&state, &headers).unwrap();
+        assert_eq!(agent.email, "alice@example.com");
+    }
+
+    #[test]
+    fn legacy_agent_directory_toggle_deserializes_to_public_policy() {
+        let enabled: AdminSettings = serde_json::from_value(json!({
+            "allow_registration": true,
+            "oauth_channels": [],
+            "agent_secret_prefix": "prefix-",
+            "allow_agent_directory": true
+        }))
+        .unwrap();
+        assert_eq!(
+            enabled.agent_directory_visibility,
+            AgentDirectoryVisibility::PublicUsers
+        );
+        assert!(enabled.allow_agent_directory);
+
+        let disabled: AdminSettings = serde_json::from_value(json!({
+            "allow_registration": true,
+            "oauth_channels": [],
+            "agent_secret_prefix": "prefix-",
+            "allow_agent_directory": false
+        }))
+        .unwrap();
+        assert_eq!(
+            disabled.agent_directory_visibility,
+            AgentDirectoryVisibility::SelfOnly
+        );
+        assert!(!disabled.allow_agent_directory);
+
+        let stale_enabled: AdminSettings = serde_json::from_value(json!({
+            "allow_registration": true,
+            "oauth_channels": [],
+            "agent_secret_prefix": "prefix-",
+            "allow_agent_directory": true,
+            "agent_directory_visibility": "self_only"
+        }))
+        .unwrap();
+        assert_eq!(
+            stale_enabled.agent_directory_visibility,
+            AgentDirectoryVisibility::PublicUsers
+        );
+        assert!(stale_enabled.allow_agent_directory);
+
+        let stale_disabled: AdminSettings = serde_json::from_value(json!({
+            "allow_registration": true,
+            "oauth_channels": [],
+            "agent_secret_prefix": "prefix-",
+            "allow_agent_directory": false,
+            "agent_directory_visibility": "public_users"
+        }))
+        .unwrap();
+        assert_eq!(
+            stale_disabled.agent_directory_visibility,
+            AgentDirectoryVisibility::SelfOnly
+        );
+        assert!(!stale_disabled.allow_agent_directory);
+
+        let visibility_only: AdminSettings = serde_json::from_value(json!({
+            "allow_registration": true,
+            "oauth_channels": [],
+            "agent_secret_prefix": "prefix-",
+            "agent_directory_visibility": "reputation_at_least"
+        }))
+        .unwrap();
+        assert_eq!(
+            visibility_only.agent_directory_visibility,
+            AgentDirectoryVisibility::ReputationAtLeast
+        );
+        assert!(visibility_only.allow_agent_directory);
     }
 
     #[test]
@@ -330,11 +474,78 @@ mod tests {
     }
 
     #[test]
+    fn agent_directory_visibility_policy_filters_profiles() {
+        let state = test_state();
+        let now = now_unix();
+        {
+            let mut users = state.users.lock().unwrap();
+            let mut alice = new_user_record("alice@example.com", now, "Alice #ops");
+            alice.is_public = false;
+            alice.friends = vec!["bob@example.com".to_string()];
+            let mut bob = new_user_record("bob@example.com", now, "Bob #review");
+            bob.is_public = false;
+            bob.friends = vec!["alice@example.com".to_string()];
+            let mut carol = new_user_record("carol@example.com", now, "Carol #qa");
+            carol.is_public = true;
+            let mut dave = new_user_record("dave@example.com", now, "Dave #support");
+            dave.is_public = true;
+            let mut erin = new_user_record("erin@example.com", now, "Erin #private");
+            erin.is_public = false;
+            users.insert(alice);
+            users.insert(bob);
+            users.insert(carol);
+            users.insert(dave);
+            users.insert(erin);
+        }
+        db_store_human_rating(&state, "carol@example.com", "alice@example.com", 8.0, None)
+            .unwrap();
+        db_store_human_rating(&state, "dave@example.com", "alice@example.com", 4.0, None)
+            .unwrap();
+        db_store_human_rating(&state, "erin@example.com", "alice@example.com", 10.0, None)
+            .unwrap();
+
+        let visible = |directory_visibility| {
+            let agent = AgentContext {
+                email: "alice@example.com".to_string(),
+                directory_visibility,
+                directory_min_reputation: 6.0,
+            };
+            agent_visible_profiles(&state, &agent, None, None)
+                .unwrap()
+                .into_iter()
+                .map(|profile| normalize_email(&profile.email))
+                .collect::<Vec<_>>()
+        };
+
+        let self_only = visible(AgentDirectoryVisibility::SelfOnly);
+        assert_eq!(self_only, vec!["alice@example.com".to_string()]);
+
+        let self_and_friends = visible(AgentDirectoryVisibility::SelfAndFriends);
+        assert!(self_and_friends.contains(&"alice@example.com".to_string()));
+        assert!(self_and_friends.contains(&"bob@example.com".to_string()));
+        assert_eq!(self_and_friends.len(), 2);
+
+        let public_users = visible(AgentDirectoryVisibility::PublicUsers);
+        assert!(public_users.contains(&"alice@example.com".to_string()));
+        assert!(public_users.contains(&"carol@example.com".to_string()));
+        assert!(public_users.contains(&"dave@example.com".to_string()));
+        assert!(!public_users.contains(&"bob@example.com".to_string()));
+        assert!(!public_users.contains(&"erin@example.com".to_string()));
+
+        let reputable = visible(AgentDirectoryVisibility::ReputationAtLeast);
+        assert!(reputable.contains(&"alice@example.com".to_string()));
+        assert!(reputable.contains(&"carol@example.com".to_string()));
+        assert!(!reputable.contains(&"dave@example.com".to_string()));
+        assert!(!reputable.contains(&"erin@example.com".to_string()));
+    }
+
+    #[test]
     fn agent_created_tasks_are_scoped_to_secret_owner() {
         let state = test_state();
         let agent = AgentContext {
             email: "alice@example.com".to_string(),
-            can_view_directory: false,
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
         };
 
         let task = create_agent_task_from_agent(
@@ -442,6 +653,83 @@ mod tests {
         let reputation = db_reputation_summary_for(&state, "bob@example.com").unwrap();
         assert_eq!(reputation.ratings_count, 2);
         assert_eq!(reputation.reputation, 4.0);
+    }
+
+    #[test]
+    fn ratings_validate_targets_and_update_existing_score() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("alice@example.com", 1, "Alice"));
+            users.insert(new_user_record("bob@example.com", 1, "Bob"));
+            users.save(&state.config.users_file).unwrap();
+        }
+
+        let initial = db_reputation_summary_for(&state, "bob@example.com").unwrap();
+        assert_eq!(initial.ratings_count, 0);
+        assert_eq!(initial.reputation, 5.0);
+
+        let invalid = rate_human_from_actor(
+            &state,
+            "alice@example.com",
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 11.0,
+                note: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(invalid.status, StatusCode::BAD_REQUEST);
+
+        let self_rating = rate_human_from_actor(
+            &state,
+            "alice@example.com",
+            RateHumanRequest {
+                rated_email: "alice@example.com".to_string(),
+                score: 10.0,
+                note: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(self_rating.message, "cannot rate or report yourself");
+
+        let missing = rate_human_from_actor(
+            &state,
+            "alice@example.com",
+            RateHumanRequest {
+                rated_email: "missing@example.com".to_string(),
+                score: 7.0,
+                note: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(missing.message, "target human not found");
+
+        let first = rate_human_from_actor(
+            &state,
+            "alice@example.com",
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 7.0,
+                note: Some("solid".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(first.ratings_count, 1);
+        assert_eq!(first.reputation, 7.0);
+
+        let updated = rate_human_from_actor(
+            &state,
+            "alice@example.com",
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 9.0,
+                note: Some("better".to_string()),
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.ratings_count, 1);
+        assert_eq!(updated.reputation, 9.0);
     }
 
     fn tag_count(tags: &[Value], tag: &str) -> Option<u64> {

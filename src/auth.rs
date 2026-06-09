@@ -189,6 +189,8 @@ async fn agent_access(
         "user_agent_secret": suffix,
         "agent_secret": format!("{}{}", prefix, suffix),
         "allow_agent_directory": settings.allow_agent_directory,
+        "agent_directory_visibility": settings.agent_directory_visibility,
+        "agent_directory_min_reputation": settings.agent_directory_min_reputation,
         "friend_code": intro_code.clone(),
         "intro_code": intro_code,
         "is_public": is_public,

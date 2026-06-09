@@ -206,9 +206,6 @@ fn agent_visible_profiles(
     query: Option<&str>,
     tag: Option<&str>,
 ) -> Result<Vec<PublicUserProfile>, ApiError> {
-    if agent.can_view_directory {
-        return user_profiles(state, query, tag);
-    }
     let online = online_emails(state);
     let reputations = db_reputation_map(state)?;
     let users = state
@@ -221,19 +218,53 @@ fn agent_visible_profiles(
         .map(|value| value.to_ascii_lowercase());
     let tag = tag.and_then(normalize_tag);
     let admin_email = normalize_email(&state.config.admin_email);
-    let Some(record) = users.users.get(&agent.email) else {
-        return Ok(Vec::new());
-    };
-    let profile = public_profile_from_record_with_online_and_reputation(
-        record,
-        &admin_email,
-        &online,
-        reputation_for(&reputations, &record.email),
-    );
-    if profile_matches(&profile, query.as_deref(), tag.as_deref()) {
-        Ok(vec![profile])
-    } else {
-        Ok(Vec::new())
+    let viewer = users.users.get(&agent.email);
+    let friends = viewer
+        .map(|record| normalize_email_list(record.friends.clone()))
+        .unwrap_or_default();
+    let min_reputation = agent.directory_min_reputation;
+    let mut profiles: Vec<_> = users
+        .users
+        .values()
+        .filter(|record| {
+            agent_can_see_record(
+                agent,
+                record,
+                &friends,
+                reputation_for(&reputations, &record.email).reputation,
+                min_reputation,
+            )
+        })
+        .map(|record| {
+            public_profile_from_record_with_online_and_reputation(
+                record,
+                &admin_email,
+                &online,
+                reputation_for(&reputations, &record.email),
+            )
+        })
+        .filter(|profile| profile_matches(profile, query.as_deref(), tag.as_deref()))
+        .collect();
+    profiles.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.email.cmp(&b.email)));
+    Ok(profiles)
+}
+
+fn agent_can_see_record(
+    agent: &AgentContext,
+    record: &UserRecord,
+    friends: &[String],
+    reputation: f64,
+    min_reputation: f64,
+) -> bool {
+    let email = normalize_email(&record.email);
+    if email == agent.email {
+        return true;
+    }
+    match agent.directory_visibility {
+        AgentDirectoryVisibility::SelfOnly => false,
+        AgentDirectoryVisibility::SelfAndFriends => friends.iter().any(|friend| friend == &email),
+        AgentDirectoryVisibility::PublicUsers => record.is_public,
+        AgentDirectoryVisibility::ReputationAtLeast => record.is_public && reputation >= min_reputation,
     }
 }
 
@@ -496,6 +527,12 @@ fn sanitize_admin_settings(mut settings: AdminSettings) -> AdminSettings {
     settings.agent_secret_prefix =
         normalize_optional_value(settings.agent_secret_prefix.as_deref())
             .or_else(default_agent_secret_prefix);
+    if !settings.agent_directory_min_reputation.is_finite() {
+        settings.agent_directory_min_reputation = default_agent_directory_min_reputation();
+    }
+    settings.agent_directory_min_reputation =
+        settings.agent_directory_min_reputation.clamp(0.0, 10.0);
+    settings.allow_agent_directory = settings.agent_directory_visibility.allows_non_self();
     for channel in &mut settings.oauth_channels {
         channel.provider = normalize_oauth_provider(&channel.provider);
         channel.client_id = channel.client_id.trim().to_string();
@@ -592,7 +629,8 @@ fn require_agent_access(state: &AppState, headers: &HeaderMap) -> Result<AgentCo
             ensure_user_allowed(state, &email)?;
             return Ok(AgentContext {
                 email,
-                can_view_directory: settings.allow_agent_directory,
+                directory_visibility: settings.agent_directory_visibility,
+                directory_min_reputation: settings.agent_directory_min_reputation,
             });
         }
     }

@@ -160,7 +160,7 @@ fn init_admin(args: InitAdminArgs) -> anyhow::Result<()> {
 
     println!("Initialized admin account in {}", args.env_file.display());
     println!("Admin email: {email}");
-    println!("{} {}", "Admin password:", admin_pass);
+    println!("Admin password: {admin_pass}");
     println!("Restart the service after changing the env file:");
     println!("  sudo systemctl restart humen-mcp.service");
     Ok(())

@@ -690,7 +690,7 @@ fn answer_request_internal(
         state.trash.remove(&id);
         late = true;
         expired.request
-    } else if let Some((request, status)) = db_get_request(&state, id)? {
+    } else if let Some((request, status)) = db_get_request(state, id)? {
         if actor_email.is_some_and(|email| !can_access_request(email, &request)) {
             return Err(ApiError::unauthorized(
                 "request is assigned to another user",

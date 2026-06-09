@@ -140,23 +140,23 @@ async fn call_tool(
     match name {
         "ask_humen" => {
             let create = parse_humen_request_arguments(&payload, name, None)?;
-            return create_humen_request(state, agent, id, create, false).await;
+            create_humen_request(state, agent, id, create, false).await
         }
         "ask_humen_async" => {
             let create = parse_humen_request_arguments(&payload, name, None)?;
-            return create_humen_request(state, agent, id, create, true).await;
+            create_humen_request(state, agent, id, create, true).await
         }
         "ask_humen_text_async" => {
             let create = parse_humen_request_arguments(&payload, name, Some(TaskKind::Text))?;
-            return create_humen_request(state, agent, id, create, true).await;
+            create_humen_request(state, agent, id, create, true).await
         }
         "ask_humen_choice_async" => {
             let create = parse_humen_request_arguments(&payload, name, Some(TaskKind::Choice))?;
-            return create_humen_request(state, agent, id, create, true).await;
+            create_humen_request(state, agent, id, create, true).await
         }
         "ask_humen_judgment_async" => {
             let create = parse_humen_request_arguments(&payload, name, Some(TaskKind::Judgment))?;
-            return create_humen_request(state, agent, id, create, true).await;
+            create_humen_request(state, agent, id, create, true).await
         }
         "read_humen_replies" => {
             let arguments = payload
@@ -167,10 +167,10 @@ async fn call_tool(
             let args: ReadLateRepliesArgs = serde_json::from_value(arguments).map_err(|err| {
                 ApiError::bad_request(format!("invalid read_humen_replies arguments: {err}"))
             })?;
-            return Ok(Json(mcp_text_result(
+            Ok(Json(mcp_text_result(
                 id,
                 json!({ "replies": db_read_humen_replies(&state, &agent.email, args)? }),
-            )));
+            )))
         }
         "create_humen_task" => {
             let arguments = payload
@@ -182,7 +182,7 @@ async fn call_tool(
                 ApiError::bad_request(format!("invalid create_humen_task arguments: {err}"))
             })?;
             let task = create_agent_task_from_agent(&state, &agent, args)?;
-            return Ok(Json(mcp_text_result(id, json!({ "task": task }))));
+            Ok(Json(mcp_text_result(id, json!({ "task": task }))))
         }
         "list_humen_tasks" => {
             let arguments = payload
@@ -200,14 +200,14 @@ async fn call_tool(
                 query.include_archived,
                 200,
             )?;
-            return Ok(Json(mcp_text_result(id, json!({ "tasks": tasks }))));
+            Ok(Json(mcp_text_result(id, json!({ "tasks": tasks }))))
         }
         "list_online_humens" => {
             let users: Vec<_> = agent_visible_profiles(&state, &agent, None, None)?
                 .into_iter()
                 .filter(|profile| profile.online)
                 .collect();
-            return Ok(Json(mcp_text_result(id, json!({ "users": users }))));
+            Ok(Json(mcp_text_result(id, json!({ "users": users }))))
         }
         "search_humen_profiles" => {
             let arguments = payload
@@ -218,13 +218,13 @@ async fn call_tool(
             let q = arguments.get("q").and_then(Value::as_str);
             let tag = arguments.get("tag").and_then(Value::as_str);
             let users = agent_visible_profiles(&state, &agent, q, tag)?;
-            return Ok(Json(mcp_text_result(id, json!({ "users": users }))));
+            Ok(Json(mcp_text_result(id, json!({ "users": users }))))
         }
         "list_humen_tags" => {
-            return Ok(Json(mcp_text_result(
+            Ok(Json(mcp_text_result(
                 id,
                 json!({ "tags": agent_visible_tag_counts(&state, &agent)? }),
-            )));
+            )))
         }
         "rate_humen" => {
             let arguments = payload
@@ -236,7 +236,7 @@ async fn call_tool(
                 ApiError::bad_request(format!("invalid rate_humen arguments: {err}"))
             })?;
             let reputation = rate_human_from_actor(&state, &agent.email, args)?;
-            return Ok(Json(mcp_text_result(id, json!({ "reputation": reputation }))));
+            Ok(Json(mcp_text_result(id, json!({ "reputation": reputation }))))
         }
         "report_humen" => {
             let arguments = payload
@@ -248,9 +248,9 @@ async fn call_tool(
                 ApiError::bad_request(format!("invalid report_humen arguments: {err}"))
             })?;
             let report = report_human_from_actor(&state, &agent.email, args)?;
-            return Ok(Json(mcp_text_result(id, json!({ "report": report }))));
+            Ok(Json(mcp_text_result(id, json!({ "report": report }))))
         }
-        _ => return Ok(Json(mcp_error(id, -32602, "unknown tool"))),
+        _ => Ok(Json(mcp_error(id, -32602, "unknown tool"))),
     }
 }
 

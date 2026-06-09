@@ -17,20 +17,15 @@ struct HumanRequest {
     assigned_to: Option<String>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum TaskKind {
     Choice,
     Judgment,
+    #[default]
     Text,
     ImageReview,
     Steps,
-}
-
-impl Default for TaskKind {
-    fn default() -> Self {
-        Self::Text
-    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -103,19 +98,14 @@ struct HumanLeaderboardStat {
     latest_answered_at: Option<u64>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum AgentTaskStatus {
+    #[default]
     Open,
     InProgress,
     Done,
     Archived,
-}
-
-impl Default for AgentTaskStatus {
-    fn default() -> Self {
-        Self::Open
-    }
 }
 
 impl AgentTaskStatus {
@@ -260,7 +250,8 @@ struct Session {
 #[derive(Clone, Debug)]
 struct AgentContext {
     email: String,
-    can_view_directory: bool,
+    directory_visibility: AgentDirectoryVisibility,
+    directory_min_reputation: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -347,7 +338,22 @@ struct PasskeyAuthenticationFinishRequest {
     credential: PublicKeyCredential,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AgentDirectoryVisibility {
+    PublicUsers,
+    ReputationAtLeast,
+    SelfAndFriends,
+    SelfOnly,
+}
+
+impl AgentDirectoryVisibility {
+    fn allows_non_self(self) -> bool {
+        !matches!(self, Self::SelfOnly)
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct AdminSettings {
     allow_registration: bool,
     oauth_channels: Vec<OAuthChannel>,
@@ -355,8 +361,61 @@ struct AdminSettings {
     agent_secret_prefix: Option<String>,
     #[serde(default)]
     allow_agent_directory: bool,
+    #[serde(default = "default_agent_directory_visibility")]
+    agent_directory_visibility: AgentDirectoryVisibility,
+    #[serde(default = "default_agent_directory_min_reputation")]
+    agent_directory_min_reputation: f64,
     #[serde(default)]
     webhooks: Vec<WebhookConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAdminSettings {
+    #[serde(default = "default_true")]
+    allow_registration: bool,
+    #[serde(default = "default_oauth_channels")]
+    oauth_channels: Vec<OAuthChannel>,
+    #[serde(default = "default_agent_secret_prefix", alias = "agent_secret")]
+    agent_secret_prefix: Option<String>,
+    #[serde(default)]
+    allow_agent_directory: Option<bool>,
+    #[serde(default)]
+    agent_directory_visibility: Option<AgentDirectoryVisibility>,
+    #[serde(default = "default_agent_directory_min_reputation")]
+    agent_directory_min_reputation: f64,
+    #[serde(default)]
+    webhooks: Vec<WebhookConfig>,
+}
+
+impl<'de> Deserialize<'de> for AdminSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawAdminSettings::deserialize(deserializer)?;
+        let agent_directory_visibility =
+            match (raw.agent_directory_visibility, raw.allow_agent_directory) {
+                (Some(visibility), Some(allow_agent_directory))
+                    if visibility.allows_non_self() == allow_agent_directory =>
+                {
+                    visibility
+                }
+                (Some(_), Some(allow_agent_directory)) | (None, Some(allow_agent_directory)) => {
+                    legacy_agent_directory_visibility(allow_agent_directory)
+                }
+                (Some(visibility), None) => visibility,
+                (None, None) => default_agent_directory_visibility(),
+            };
+        Ok(Self {
+            allow_registration: raw.allow_registration,
+            oauth_channels: raw.oauth_channels,
+            agent_secret_prefix: raw.agent_secret_prefix,
+            allow_agent_directory: agent_directory_visibility.allows_non_self(),
+            agent_directory_visibility,
+            agent_directory_min_reputation: raw.agent_directory_min_reputation,
+            webhooks: raw.webhooks,
+        })
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -382,14 +441,11 @@ impl Default for AdminSettings {
     fn default() -> Self {
         Self {
             allow_registration: true,
-            oauth_channels: vec![OAuthChannel {
-                provider: "github".to_string(),
-                enabled: false,
-                client_id: String::new(),
-                client_secret: None,
-            }],
+            oauth_channels: default_oauth_channels(),
             agent_secret_prefix: default_agent_secret_prefix(),
             allow_agent_directory: false,
+            agent_directory_visibility: default_agent_directory_visibility(),
+            agent_directory_min_reputation: default_agent_directory_min_reputation(),
             webhooks: Vec::new(),
         }
     }
@@ -489,6 +545,31 @@ struct WeixinQrStatusResponse {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_oauth_channels() -> Vec<OAuthChannel> {
+    vec![OAuthChannel {
+        provider: "github".to_string(),
+        enabled: false,
+        client_id: String::new(),
+        client_secret: None,
+    }]
+}
+
+fn default_agent_directory_visibility() -> AgentDirectoryVisibility {
+    AgentDirectoryVisibility::SelfOnly
+}
+
+fn legacy_agent_directory_visibility(allow_agent_directory: bool) -> AgentDirectoryVisibility {
+    if allow_agent_directory {
+        AgentDirectoryVisibility::PublicUsers
+    } else {
+        default_agent_directory_visibility()
+    }
+}
+
+fn default_agent_directory_min_reputation() -> f64 {
+    5.0
 }
 
 fn default_webhook_kind() -> String {
