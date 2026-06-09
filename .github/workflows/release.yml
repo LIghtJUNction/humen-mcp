@@ -118,6 +118,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p dist-release
           scripts/package-release.sh "${{ steps.version.outputs.version }}" | tee dist-release/checksums.txt
           asset="dist-release/humen-mcp-${{ steps.version.outputs.version }}-${TARGET}.tar.gz"
           test -f "${asset}"
