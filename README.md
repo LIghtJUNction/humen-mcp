@@ -125,6 +125,10 @@ If the human does not answer in time, the request is removed from pending, added
 
 Example payloads are in `examples/`.
 
+Tags are normalized to lowercase `#tag` values. `#admin` is a reserved tag:
+clients and agents cannot assign it through profile updates or task text, and the
+backend only derives it for the configured admin identity.
+
 ## HTTP and WebSocket API
 
 Authenticated UI APIs:
@@ -274,10 +278,11 @@ git tag v<version>
 git push origin v<version>
 ```
 
-The `Release` workflow can also be run manually from GitHub Actions with a
-`version` input. It builds the Rust binary and web UI, uploads the tarball plus
-`.sha256` as workflow artifacts, and creates or updates GitHub Release
-`v<version>`.
+The `Release` workflow can also be run manually from GitHub Actions. Its
+`version` input is optional and defaults to `auto`, which uses the version in
+`Cargo.toml`. The GitHub Release tag is always `v<version>`. It builds the Rust
+binary and web UI, uploads the tarball plus `.sha256` as workflow artifacts, and
+creates or updates that GitHub Release.
 
 The tarball is written to `dist-release/` and contains:
 

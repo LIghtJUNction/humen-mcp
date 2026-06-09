@@ -7,8 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, e.g. 0.1.3 or v0.1.3"
-        required: true
+        description: "Release version, e.g. 0.1.3, or auto to use Cargo.toml. The GitHub Release tag is always v<version>."
+        required: false
+        default: "auto"
         type: string
 
 permissions:
@@ -60,11 +61,18 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             tag="${GITHUB_REF_NAME}"
             version="${tag#v}"
           else
-            version="${INPUT_VERSION#v}"
+            requested="${INPUT_VERSION:-auto}"
+            if [[ -z "${requested}" || "${requested}" == "auto" ]]; then
+              version="${cargo_version}"
+            else
+              version="${requested#v}"
+            fi
             tag="v${version}"
           fi
 
@@ -73,7 +81,6 @@ jobs:
             exit 1
           fi
 
-          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
           if [[ "${version}" != "${cargo_version}" ]]; then
             echo "Version mismatch: requested ${version}, but Cargo.toml is ${cargo_version}" >&2
             exit 1
@@ -83,6 +90,26 @@ jobs:
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "Release tag: ${tag}"
           echo "Release version: ${version}"
+
+      - name: Ensure release tag for manual dispatch
+        if: github.ref_type != 'tag'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+            tagged_sha="$(git rev-list -n 1 "${TAG}")"
+            if [[ "${tagged_sha}" != "${GITHUB_SHA}" ]]; then
+              echo "Tag ${TAG} already points at ${tagged_sha}, not this workflow commit ${GITHUB_SHA}." >&2
+              echo "Bump Cargo.toml to a new version or delete the old tag before publishing." >&2
+              exit 1
+            fi
+          else
+            git tag "${TAG}" "${GITHUB_SHA}"
+            git push origin "refs/tags/${TAG}"
+          fi
 
       - name: Run Rust tests
         run: cargo test --locked
