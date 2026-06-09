@@ -26,6 +26,7 @@ Human-in-the-loop MCP server. Agents call MCP tools, `humen-mcp` turns the call 
 | Service env file | `/etc/humen-mcp.env` |
 | User/activity store | `/var/lib/humen-mcp/users.json` |
 | systemd unit | `humen-mcp.service` |
+| self-update unit | `humen-mcp-self-update.service` |
 
 `GET /mcp` is intentionally not the UI; it returns a method warning. Open the UI at `/mcp/` with the trailing slash.
 
@@ -151,6 +152,8 @@ Admin APIs:
 - `POST /api/admin/users/{email}/kick`
 - `GET /api/admin/settings`
 - `POST /api/admin/settings`
+- `GET /api/admin/update`
+- `POST /api/admin/update`
 
 WebSocket events:
 
@@ -176,6 +179,8 @@ HUMEN_ADMIN_PASSWORD=<generated-admin-password>
 HUMEN_SESSION_SECRET=<generated-session-secret>
 HUMEN_TRASH_RETENTION_SECONDS=604800
 HUMEN_CLEANUP_INTERVAL_SECONDS=60
+HUMEN_SELF_UPDATE_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start humen-mcp-self-update.service
+HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=30
 ```
 
 Production note: after AUR install, make sure `/etc/humen-mcp.env` uses the packaged web directory:
@@ -213,6 +218,25 @@ sudo systemctl enable --now humen-mcp.service
 ```
 
 The `init-admin` command writes `/etc/humen-mcp.env`, generates a new session secret, and prints the generated admin password. Save that password in your password manager; do not commit it.
+
+Packaged installs include admin-triggered self-update support. The web UI calls
+`POST /api/admin/update`; the service then starts `humen-mcp-self-update.service`
+through a sudoers rule limited to that exact systemctl command. The oneshot unit
+runs the configured AUR helper as the normal AUR user, upgrades
+`humen-mcp-bin` or `humen-mcp-git`, reloads systemd, and restarts
+`humen-mcp.service`.
+
+Override updater defaults in `/etc/humen-mcp-update.env` when needed:
+
+```bash
+HUMEN_UPDATE_AUR_USER=arch
+HUMEN_UPDATE_HELPER=paru
+HUMEN_UPDATE_PACKAGE=humen-mcp-bin
+```
+
+Because the updater runs from systemd without a TTY, the AUR user must be able
+to run its package installation step non-interactively, for example with
+`sudo -n true` succeeding for that user.
 
 After editing `/etc/humen-mcp.env`:
 
@@ -289,6 +313,9 @@ The tarball is written to `dist-release/` and contains:
 - `humen-mcp`
 - `web/`
 - `packaging/systemd/humen-mcp.service`
+- `packaging/systemd/humen-mcp-self-update.service`
+- `packaging/scripts/humen-mcp-self-update`
+- `packaging/sudoers/humen-mcp-self-update`
 - `packaging/sysusers/humen-mcp.conf`
 - `packaging/tmpfiles/humen-mcp.conf`
 - `env.example`

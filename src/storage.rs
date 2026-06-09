@@ -226,6 +226,107 @@ fn db_list_answered_requests(
     Ok(answered)
 }
 
+fn db_list_human_leaderboard(state: &AppState) -> Result<Vec<HumanLeaderboardStat>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT request_json, answer_json, answered_at \
+             FROM human_requests \
+             WHERE status = 'answered' AND answer_json IS NOT NULL",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare leaderboard query: {err}")))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<u64>>(2)?,
+            ))
+        })
+        .map_err(|err| ApiError::internal(format!("query leaderboard requests: {err}")))?;
+    let mut by_email: HashMap<String, HumanLeaderboardStat> = HashMap::new();
+    for row in rows {
+        let (request_json, answer_json, answered_at) =
+            row.map_err(|err| ApiError::internal(format!("read leaderboard request: {err}")))?;
+        let request: HumanRequest = serde_json::from_str(&request_json)
+            .map_err(|err| ApiError::internal(format!("parse leaderboard request: {err}")))?;
+        let answer: HumanAnswer = serde_json::from_str(&answer_json)
+            .map_err(|err| ApiError::internal(format!("parse leaderboard answer: {err}")))?;
+        let email = request
+            .assigned_to
+            .as_deref()
+            .map(normalize_email)
+            .filter(|email| !email.is_empty())
+            .or_else(|| {
+                let answered_by = normalize_email(&answer.answered_by);
+                if answered_by.is_empty() || answered_by.contains(':') {
+                    None
+                } else {
+                    Some(answered_by)
+                }
+            });
+        let Some(email) = email else {
+            continue;
+        };
+        let mut answer_tokens = estimate_text_tokens(&answer.answer);
+        if let Some(note) = answer.note.as_deref() {
+            answer_tokens = answer_tokens.saturating_add(estimate_text_tokens(note));
+        }
+        let stat = by_email
+            .entry(email.clone())
+            .or_insert_with(|| HumanLeaderboardStat {
+                email,
+                requests_handled: 0,
+                sent_tokens: 0,
+                latest_answered_at: None,
+            });
+        stat.requests_handled = stat.requests_handled.saturating_add(1);
+        stat.sent_tokens = stat.sent_tokens.saturating_add(answer_tokens);
+        if let Some(answered_at) = answered_at {
+            stat.latest_answered_at = Some(
+                stat.latest_answered_at
+                    .map(|current| current.max(answered_at))
+                    .unwrap_or(answered_at),
+            );
+        }
+    }
+    let mut stats: Vec<_> = by_email.into_values().collect();
+    stats.sort_by(|left, right| {
+        right
+            .requests_handled
+            .cmp(&left.requests_handled)
+            .then_with(|| right.sent_tokens.cmp(&left.sent_tokens))
+            .then_with(|| left.email.cmp(&right.email))
+    });
+    Ok(stats)
+}
+
+fn estimate_text_tokens(value: &str) -> u64 {
+    let mut tokens = 0u64;
+    let mut ascii_run = 0u64;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            ascii_run = ascii_run.saturating_add(1);
+            continue;
+        }
+        if ascii_run > 0 {
+            tokens = tokens.saturating_add(ascii_run.saturating_add(3) / 4);
+            ascii_run = 0;
+        }
+        if ch.is_whitespace() {
+            continue;
+        }
+        tokens = tokens.saturating_add(1);
+    }
+    if ascii_run > 0 {
+        tokens = tokens.saturating_add(ascii_run.saturating_add(3) / 4);
+    }
+    tokens
+}
+
 fn db_read_humen_replies(
     state: &AppState,
     agent_email: &str,
@@ -387,6 +488,179 @@ fn db_list_agent_tasks(
         );
     }
     Ok(tasks)
+}
+
+fn db_store_human_rating(
+    state: &AppState,
+    rated_email: &str,
+    rater_email: &str,
+    score: f64,
+    note: Option<&str>,
+) -> Result<ReputationSummary, ApiError> {
+    let rated_email = normalize_email(rated_email);
+    let rater_email = normalize_email(rater_email);
+    let score = score.clamp(0.0, 10.0);
+    let note = normalize_optional_value(note);
+    let now = now_unix();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO human_ratings \
+         (rated_email, rater_email, score, note, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5) \
+         ON CONFLICT(rated_email, rater_email) DO UPDATE SET \
+           score=excluded.score, note=excluded.note, updated_at=excluded.updated_at",
+        params![rated_email, rater_email, score, note, now],
+    )
+    .map_err(|err| ApiError::internal(format!("persist human rating: {err}")))?;
+    reputation_summary_from_db(&db, &rated_email)
+}
+
+fn db_reputation_summary_for(
+    state: &AppState,
+    email: &str,
+) -> Result<ReputationSummary, ApiError> {
+    let email = normalize_email(email);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    reputation_summary_from_db(&db, &email)
+}
+
+fn reputation_summary_from_db(
+    db: &Connection,
+    email: &str,
+) -> Result<ReputationSummary, ApiError> {
+    let row = db
+        .query_row(
+            "SELECT AVG(score), COUNT(*) FROM human_ratings WHERE rated_email = ?1",
+            params![normalize_email(email)],
+            |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, u64>(1)?)),
+        )
+        .map_err(|err| ApiError::internal(format!("read reputation: {err}")))?;
+    Ok(ReputationSummary {
+        reputation: row.0.unwrap_or(5.0),
+        ratings_count: row.1,
+    })
+}
+
+fn db_reputation_map(state: &AppState) -> Result<HashMap<String, ReputationSummary>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT rated_email, AVG(score), COUNT(*) \
+             FROM human_ratings \
+             GROUP BY rated_email",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare reputation map: {err}")))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<f64>>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        })
+        .map_err(|err| ApiError::internal(format!("query reputation map: {err}")))?;
+    let mut map = HashMap::new();
+    for row in rows {
+        let (email, reputation, ratings_count) =
+            row.map_err(|err| ApiError::internal(format!("read reputation map: {err}")))?;
+        map.insert(
+            normalize_email(&email),
+            ReputationSummary {
+                reputation: reputation.unwrap_or(5.0),
+                ratings_count,
+            },
+        );
+    }
+    Ok(map)
+}
+
+fn db_create_human_report(
+    state: &AppState,
+    reporter_email: &str,
+    reported_email: &str,
+    reason: &str,
+) -> Result<HumanReport, ApiError> {
+    let reporter_email = normalize_email(reporter_email);
+    let reported_email = normalize_email(reported_email);
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::bad_request("report reason is required"));
+    }
+    let report = HumanReport {
+        id: Uuid::new_v4(),
+        reporter_email,
+        reported_email,
+        reason: reason.to_string(),
+        created_at: now_unix(),
+        status: "open".to_string(),
+    };
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO human_reports \
+         (id, reporter_email, reported_email, reason, created_at, status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![
+            report.id.to_string(),
+            report.reporter_email,
+            report.reported_email,
+            report.reason,
+            report.created_at,
+            report.status
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist human report: {err}")))?;
+    Ok(report)
+}
+
+fn db_list_human_reports(state: &AppState, limit: u64) -> Result<Vec<HumanReport>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT id, reporter_email, reported_email, reason, created_at, status \
+             FROM human_reports \
+             ORDER BY created_at DESC \
+             LIMIT ?1",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare reports query: {err}")))?;
+    let rows = stmt
+        .query_map(params![limit.clamp(1, 500)], |row| {
+            let id: String = row.get(0)?;
+            Ok(HumanReport {
+                id: Uuid::parse_str(&id).map_err(|err| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(err),
+                    )
+                })?,
+                reporter_email: row.get(1)?,
+                reported_email: row.get(2)?,
+                reason: row.get(3)?,
+                created_at: row.get(4)?,
+                status: row.get(5)?,
+            })
+        })
+        .map_err(|err| ApiError::internal(format!("query human reports: {err}")))?;
+    let mut reports = Vec::new();
+    for row in rows {
+        reports.push(row.map_err(|err| ApiError::internal(format!("read human report: {err}")))?);
+    }
+    Ok(reports)
 }
 
 async fn trash_cleanup_loop(state: AppState) {

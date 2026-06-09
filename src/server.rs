@@ -95,12 +95,16 @@ fn api_router() -> Router<AppState> {
         .route("/requests", get(list_requests))
         .route("/requests/{id}/answer", post(answer_request))
         .route("/sent", get(list_sent_requests))
+        .route("/stats/leaderboard", get(list_leaderboard))
         .route("/tasks", get(list_agent_tasks))
         .route("/tasks/{id}/status", post(update_agent_task_status))
         .route("/trash", get(list_trash))
         .route("/trash/clear", post(clear_trash))
         .route("/users/online", get(list_online_users))
         .route("/users/search", get(search_users))
+        .route("/humans/rate", post(rate_human))
+        .route("/humans/report", post(report_human))
+        .route("/leaderboard", get(list_leaderboard))
         .route("/tags", get(list_tags))
         .route("/friends", get(list_friends).post(create_friend_request))
         .route("/friends/{email}/accept", post(accept_friend_request))
@@ -108,6 +112,8 @@ fn api_router() -> Router<AppState> {
         .route("/admin/users", get(admin_list_users).post(admin_add_user))
         .route("/admin/users/{email}", post(admin_update_user))
         .route("/admin/users/{email}/kick", post(admin_kick_user))
+        .route("/admin/reports", get(admin_reports))
+        .route("/admin/update", get(admin_update_status).post(admin_start_update))
         .route(
             "/admin/settings",
             get(admin_settings).post(admin_update_settings),
@@ -186,6 +192,8 @@ fn default_env_lines() -> Vec<String> {
         "HUMEN_CLEANUP_INTERVAL_SECONDS=60",
         "HUMEN_GITHUB_CLIENT_ID=",
         "HUMEN_GITHUB_CLIENT_SECRET=",
+        "HUMEN_SELF_UPDATE_COMMAND=",
+        "HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=120",
     ]
     .into_iter()
     .map(str::to_string)

@@ -4,7 +4,10 @@ use std::{
     io::{self, Write},
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,7 +33,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::{broadcast, oneshot};
+use tokio::{
+    process::Command as TokioCommand,
+    sync::{broadcast, oneshot},
+};
 use tower_http::{
     cors::{Any, CorsLayer},
     services::{ServeDir, ServeFile},
@@ -57,6 +63,7 @@ include!("auth.rs");
 include!("passkeys.rs");
 include!("admin_weixin.rs");
 include!("handlers.rs");
+include!("self_update.rs");
 include!("weixin.rs");
 include!("ws.rs");
 include!("storage.rs");

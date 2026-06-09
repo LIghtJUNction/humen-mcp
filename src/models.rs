@@ -82,6 +82,27 @@ struct AnsweredRequest {
     answered_late: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct HumanLeaderboardEntry {
+    email: String,
+    requests_handled: u64,
+    sent_tokens: u64,
+    latest_answered_at: Option<u64>,
+    reputation: f64,
+    ratings_count: u64,
+    profile: String,
+    tags: Vec<String>,
+    online: bool,
+}
+
+#[derive(Clone, Debug)]
+struct HumanLeaderboardStat {
+    email: String,
+    requests_handled: u64,
+    sent_tokens: u64,
+    latest_answered_at: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum AgentTaskStatus {
@@ -126,6 +147,31 @@ struct AgentTask {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct HumanReport {
+    id: Uuid,
+    reporter_email: String,
+    reported_email: String,
+    reason: String,
+    created_at: u64,
+    status: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ReputationSummary {
+    reputation: f64,
+    ratings_count: u64,
+}
+
+impl Default for ReputationSummary {
+    fn default() -> Self {
+        Self {
+            reputation: 5.0,
+            ratings_count: 0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[allow(dead_code)]
 struct LateHumanReply {
     request: HumanRequest,
@@ -141,6 +187,8 @@ struct PublicUserProfile {
     provider: AuthProvider,
     profile: String,
     tags: Vec<String>,
+    reputation: f64,
+    ratings_count: u64,
     friend_code: String,
     intro_code: String,
     is_public: bool,
@@ -309,6 +357,25 @@ struct AdminSettings {
     allow_agent_directory: bool,
     #[serde(default)]
     webhooks: Vec<WebhookConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminUpdateStatus {
+    current_version: String,
+    enabled: bool,
+    running: bool,
+    timeout_seconds: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AdminUpdateResponse {
+    ok: bool,
+    current_version: String,
+    started: bool,
+    message: String,
+    status_code: Option<i32>,
+    stdout: String,
+    stderr: String,
 }
 
 impl Default for AdminSettings {
@@ -490,6 +557,22 @@ struct AgentTaskQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct RateHumanRequest {
+    #[serde(alias = "email")]
+    rated_email: String,
+    score: f64,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReportHumanRequest {
+    #[serde(alias = "email")]
+    reported_email: String,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AdminUserRequest {
     email: String,
     #[serde(default)]
@@ -655,6 +738,27 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_tasks_assigned ON agent_tasks(assigned_to, status, updated_at);
         CREATE INDEX IF NOT EXISTS idx_agent_tasks_created_by ON agent_tasks(created_by, updated_at);
+
+        CREATE TABLE IF NOT EXISTS human_ratings (
+            rated_email TEXT NOT NULL,
+            rater_email TEXT NOT NULL,
+            score REAL NOT NULL,
+            note TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (rated_email, rater_email)
+        );
+        CREATE INDEX IF NOT EXISTS idx_human_ratings_rated ON human_ratings(rated_email);
+
+        CREATE TABLE IF NOT EXISTS human_reports (
+            id TEXT PRIMARY KEY,
+            reporter_email TEXT NOT NULL,
+            reported_email TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open'
+        );
+        CREATE INDEX IF NOT EXISTS idx_human_reports_status ON human_reports(status, created_at);
         "#,
     )
     .context("initialize sqlite schema")?;

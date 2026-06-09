@@ -44,6 +44,37 @@ async fn list_sent_requests(
     ))
 }
 
+async fn list_leaderboard(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<HumanLeaderboardEntry>>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let visible_profiles = visible_user_profiles_for_session(&state, &session.user.email, None, None)?;
+    let mut profiles_by_email = HashMap::new();
+    for profile in visible_profiles {
+        profiles_by_email.insert(normalize_email(&profile.email), profile);
+    }
+
+    let mut entries = Vec::new();
+    for stat in db_list_human_leaderboard(&state)? {
+        let Some(profile) = profiles_by_email.get(&normalize_email(&stat.email)) else {
+            continue;
+        };
+        entries.push(HumanLeaderboardEntry {
+            email: profile.email.clone(),
+            requests_handled: stat.requests_handled,
+            sent_tokens: stat.sent_tokens,
+            latest_answered_at: stat.latest_answered_at,
+            reputation: profile.reputation,
+            ratings_count: profile.ratings_count,
+            profile: profile.profile.clone(),
+            tags: profile.tags.clone(),
+            online: profile.online,
+        });
+    }
+    Ok(Json(entries))
+}
+
 async fn list_agent_tasks(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -140,6 +171,26 @@ async fn list_tags(
     Ok(Json(
         json!({ "tags": visible_tag_counts_for_session(&state, &session.user.email)? }),
     ))
+}
+
+async fn rate_human(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<RateHumanRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let reputation = rate_human_from_actor(&state, &session.user.email, payload)?;
+    Ok(Json(json!({ "ok": true, "reputation": reputation })))
+}
+
+async fn report_human(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ReportHumanRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let report = report_human_from_actor(&state, &session.user.email, payload)?;
+    Ok(Json(json!({ "ok": true, "report": report })))
 }
 
 async fn list_friends(
@@ -302,12 +353,81 @@ async fn remove_friend(
     Ok(Json(json!({ "ok": true, "friend": other })))
 }
 
+fn rate_human_from_actor(
+    state: &AppState,
+    actor_email: &str,
+    payload: RateHumanRequest,
+) -> Result<ReputationSummary, ApiError> {
+    let actor = normalize_email(actor_email);
+    let target = normalize_email(&payload.rated_email);
+    validate_human_interaction_target(state, &actor, &target)?;
+    if !payload.score.is_finite() || !(0.0..=10.0).contains(&payload.score) {
+        return Err(ApiError::bad_request("score must be a number from 0 to 10"));
+    }
+    db_store_human_rating(
+        state,
+        &target,
+        &actor,
+        payload.score,
+        payload.note.as_deref(),
+    )
+}
+
+fn report_human_from_actor(
+    state: &AppState,
+    actor_email: &str,
+    payload: ReportHumanRequest,
+) -> Result<HumanReport, ApiError> {
+    let actor = normalize_email(actor_email);
+    let target = normalize_email(&payload.reported_email);
+    validate_human_interaction_target(state, &actor, &target)?;
+    let reason = payload.reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::bad_request("report reason is required"));
+    }
+    if reason.chars().count() > 2000 {
+        return Err(ApiError::bad_request("report reason is too long"));
+    }
+    let report = db_create_human_report(state, &actor, &target, reason)?;
+    let note = format!("Report: {reason}");
+    let _ = db_store_human_rating(state, &target, &actor, 0.0, Some(&note))?;
+    Ok(report)
+}
+
+fn validate_human_interaction_target(
+    state: &AppState,
+    actor_email: &str,
+    target_email: &str,
+) -> Result<(), ApiError> {
+    let actor = normalize_email(actor_email);
+    let target = normalize_email(target_email);
+    if target.is_empty() {
+        return Err(ApiError::bad_request("target human is required"));
+    }
+    if actor == target {
+        return Err(ApiError::bad_request("cannot rate or report yourself"));
+    }
+    if target == normalize_email(&state.config.admin_email) {
+        return Ok(());
+    }
+    let users = state
+        .users
+        .lock()
+        .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    if users.users.contains_key(&target) {
+        Ok(())
+    } else {
+        Err(ApiError::bad_request("target human not found"))
+    }
+}
+
 fn relation_profiles(
     state: &AppState,
     emails: &[String],
     viewer_email: &str,
 ) -> Result<Vec<PublicUserProfile>, ApiError> {
     let online = online_emails(state);
+    let reputations = db_reputation_map(state)?;
     let users = state
         .users
         .lock()
@@ -328,6 +448,7 @@ fn relation_profiles(
                 record,
                 &admin_email,
                 &online,
+                reputation_for(&reputations, &record.email),
                 &viewer_email,
                 &friends,
                 &incoming,
@@ -476,6 +597,14 @@ async fn admin_kick_user(
         keep
     });
     Ok(Json(json!({ "ok": true, "removed_count": removed_count })))
+}
+
+async fn admin_reports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<HumanReport>>, ApiError> {
+    require_admin(&state, &headers)?;
+    Ok(Json(db_list_human_reports(&state, 200)?))
 }
 
 async fn admin_settings(

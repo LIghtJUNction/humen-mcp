@@ -79,6 +79,16 @@ struct Config {
 
     #[arg(long, env = "HUMEN_CLEANUP_INTERVAL_SECONDS", default_value_t = 60)]
     cleanup_interval_seconds: u64,
+
+    #[arg(long, env = "HUMEN_SELF_UPDATE_COMMAND", default_value = "")]
+    self_update_command: String,
+
+    #[arg(
+        long,
+        env = "HUMEN_SELF_UPDATE_TIMEOUT_SECONDS",
+        default_value_t = 120
+    )]
+    self_update_timeout_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -95,6 +105,7 @@ struct AppState {
     db: Arc<Mutex<Connection>>,
     events: broadcast::Sender<ServerEvent>,
     shutdown: broadcast::Sender<()>,
+    self_update_running: Arc<AtomicBool>,
     http: Client,
     webauthn: Option<Arc<Webauthn>>,
 }
@@ -130,6 +141,7 @@ impl AppState {
             db: Arc::new(Mutex::new(db)),
             events,
             shutdown,
+            self_update_running: Arc::new(AtomicBool::new(false)),
             http: Client::new(),
             webauthn,
         };

@@ -22,8 +22,11 @@ The package installs:
 - `/usr/bin/humen-mcp`
 - `/usr/share/humen-mcp/web`
 - `/usr/lib/systemd/system/humen-mcp.service`
+- `/usr/lib/systemd/system/humen-mcp-self-update.service`
+- `/usr/lib/humen-mcp/humen-mcp-self-update`
 - `/usr/lib/sysusers.d/humen-mcp.conf`
 - `/usr/lib/tmpfiles.d/humen-mcp.conf`
+- `/etc/sudoers.d/humen-mcp-self-update`
 - `/etc/humen-mcp.env`
 
 ## Configure
@@ -44,9 +47,31 @@ HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
 HUMEN_ADMIN_EMAIL=<admin-email>
 HUMEN_ADMIN_PASSWORD=<generated-admin-password>
 HUMEN_SESSION_SECRET=<generated-session-secret>
+HUMEN_SELF_UPDATE_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start humen-mcp-self-update.service
+HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=30
 ```
 
 Only the configured admin account can use email/password login. GitHub OAuth is disabled until `HUMEN_GITHUB_CLIENT_ID` and `HUMEN_GITHUB_CLIENT_SECRET` are configured; once enabled, GitHub login is also the registration path for non-admin humans.
+
+The packaged systemd unit configures the self-update command automatically. If
+your AUR user is not `arch`, override the updater service environment:
+
+```bash
+sudoedit /etc/humen-mcp-update.env
+```
+
+```bash
+HUMEN_UPDATE_AUR_USER=<aur-user>
+HUMEN_UPDATE_HELPER=paru
+HUMEN_UPDATE_PACKAGE=humen-mcp-bin
+```
+
+The updater is non-interactive. Make sure the AUR user can run the package
+installation step without a password prompt, for example:
+
+```bash
+sudo -iu <aur-user> sudo -n true
+```
 
 Then:
 

@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+aur_user="${HUMEN_UPDATE_AUR_USER:-arch}"
+helper="${HUMEN_UPDATE_HELPER:-paru}"
+package="${HUMEN_UPDATE_PACKAGE:-}"
+service="${HUMEN_UPDATE_SERVICE:-humen-mcp.service}"
+
+if [[ -z "${package}" ]]; then
+  if pacman -Q humen-mcp-bin >/dev/null 2>&1; then
+    package="humen-mcp-bin"
+  elif pacman -Q humen-mcp-git >/dev/null 2>&1; then
+    package="humen-mcp-git"
+  else
+    package="humen-mcp-bin"
+  fi
+fi
+
+if ! id "${aur_user}" >/dev/null 2>&1; then
+  echo "AUR user '${aur_user}' does not exist. Set HUMEN_UPDATE_AUR_USER in /etc/humen-mcp-update.env." >&2
+  exit 1
+fi
+
+helper_path="$(command -v "${helper}" || true)"
+if [[ -z "${helper_path}" ]]; then
+  echo "AUR helper '${helper}' was not found. Set HUMEN_UPDATE_HELPER in /etc/humen-mcp-update.env." >&2
+  exit 1
+fi
+
+home="$(getent passwd "${aur_user}" | cut -d: -f6)"
+if [[ -z "${home}" || ! -d "${home}" ]]; then
+  echo "Home directory for '${aur_user}' was not found." >&2
+  exit 1
+fi
+
+if ! runuser -u "${aur_user}" -- sudo -n true >/dev/null 2>&1; then
+  echo "AUR user '${aur_user}' cannot run sudo non-interactively. Configure unattended pacman privileges for the AUR helper." >&2
+  exit 1
+fi
+
+echo "Updating ${package} as ${aur_user} with ${helper_path}"
+cd "${home}"
+runuser -u "${aur_user}" -- env -u GIT_DIR -u GIT_WORK_TREE HOME="${home}" "${helper_path}" -S --noconfirm "${package}"
+
+systemctl daemon-reload
+systemctl try-restart "${service}"

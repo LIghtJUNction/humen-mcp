@@ -96,6 +96,16 @@ async fn mcp(
                     "name": "list_humen_tags",
                     "description": "List known #tags and their usage counts.",
                     "inputSchema": json!({ "type": "object", "properties": {} })
+                },
+                {
+                    "name": "rate_humen",
+                    "description": "Rate a human from 0 to 10. Reputation is the average of ratings; unrated humans start at 5.",
+                    "inputSchema": rate_humen_schema()
+                },
+                {
+                    "name": "report_humen",
+                    "description": "Report a human to the administrator mailbox and reduce their reputation through a zero rating from this agent's owner.",
+                    "inputSchema": report_humen_schema()
                 }
             ]
         }),
@@ -215,6 +225,30 @@ async fn call_tool(
                 id,
                 json!({ "tags": agent_visible_tag_counts(&state, &agent)? }),
             )));
+        }
+        "rate_humen" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: RateHumanRequest = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid rate_humen arguments: {err}"))
+            })?;
+            let reputation = rate_human_from_actor(&state, &agent.email, args)?;
+            return Ok(Json(mcp_text_result(id, json!({ "reputation": reputation }))));
+        }
+        "report_humen" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: ReportHumanRequest = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid report_humen arguments: {err}"))
+            })?;
+            let report = report_human_from_actor(&state, &agent.email, args)?;
+            return Ok(Json(mcp_text_result(id, json!({ "report": report }))));
         }
         _ => return Ok(Json(mcp_error(id, -32602, "unknown tool"))),
     }
@@ -636,6 +670,43 @@ fn list_humen_tasks_schema() -> Value {
             "include_archived": {
                 "type": "boolean",
                 "default": false
+            }
+        }
+    })
+}
+
+fn rate_humen_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["rated_email", "score"],
+        "properties": {
+            "rated_email": {
+                "type": "string",
+                "description": "Email or stable human id to rate."
+            },
+            "score": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 10
+            },
+            "note": {
+                "type": "string"
+            }
+        }
+    })
+}
+
+fn report_humen_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["reported_email", "reason"],
+        "properties": {
+            "reported_email": {
+                "type": "string",
+                "description": "Email or stable human id to report."
+            },
+            "reason": {
+                "type": "string"
             }
         }
     })

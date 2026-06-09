@@ -18,6 +18,8 @@ mod tests {
             github_client_secret: None,
             trash_retention_seconds: 60,
             cleanup_interval_seconds: 60,
+            self_update_command: String::new(),
+            self_update_timeout_seconds: 120,
         })
         .unwrap()
     }
@@ -396,6 +398,50 @@ mod tests {
         assert!(raw.contains("HUMEN_ADMIN_PASSWORD=fixed-admin-pass"));
         assert!(raw.contains("HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json"));
         assert!(!raw.contains("HUMEN_SESSION_SECRET=change-this-to-a-long-random-secret"));
+    }
+
+    #[test]
+    fn ratings_and_reports_feed_reputation_and_admin_mailbox() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("alice@example.com", 1, "Alice"));
+            users.insert(new_user_record("bob@example.com", 1, "Bob"));
+            users.insert(new_user_record("carol@example.com", 1, "Carol"));
+            users.save(&state.config.users_file).unwrap();
+        }
+
+        let rated = rate_human_from_actor(
+            &state,
+            "alice@example.com",
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 8.0,
+                note: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(rated.ratings_count, 1);
+        assert_eq!(rated.reputation, 8.0);
+
+        let report = report_human_from_actor(
+            &state,
+            "carol@example.com",
+            ReportHumanRequest {
+                reported_email: "bob@example.com".to_string(),
+                reason: "Unsafe answer".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(report.reported_email, "bob@example.com");
+
+        let reports = db_list_human_reports(&state, 10).unwrap();
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].reason, "Unsafe answer");
+
+        let reputation = db_reputation_summary_for(&state, "bob@example.com").unwrap();
+        assert_eq!(reputation.ratings_count, 2);
+        assert_eq!(reputation.reputation, 4.0);
     }
 
     fn tag_count(tags: &[Value], tag: &str) -> Option<u64> {

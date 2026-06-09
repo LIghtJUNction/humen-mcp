@@ -100,6 +100,7 @@ fn user_profiles(
     tag: Option<&str>,
 ) -> Result<Vec<PublicUserProfile>, ApiError> {
     let online = online_emails(state);
+    let reputations = db_reputation_map(state)?;
     let users = state
         .users
         .lock()
@@ -117,12 +118,24 @@ fn user_profiles(
     let mut profiles: Vec<_> = users
         .users
         .values()
-        .map(|record| public_profile_from_record_with_online(record, &admin_email, &online))
+        .map(|record| {
+            public_profile_from_record_with_online_and_reputation(
+                record,
+                &admin_email,
+                &online,
+                reputation_for(&reputations, &record.email),
+            )
+        })
         .filter(|profile| profile_matches(profile, query.as_deref(), tag.as_deref()))
         .collect();
 
     if !has_admin_record {
-        let admin_profile = synthetic_admin_profile(state, &online, &admin_email);
+        let admin_profile = synthetic_admin_profile(
+            state,
+            &online,
+            &admin_email,
+            reputation_for(&reputations, &admin_email),
+        );
         if profile_matches(&admin_profile, query.as_deref(), tag.as_deref()) {
             profiles.push(admin_profile);
         }
@@ -143,6 +156,7 @@ fn visible_user_profiles_for_session(
         return user_profiles(state, query, tag);
     }
     let online = online_emails(state);
+    let reputations = db_reputation_map(state)?;
     let users = state
         .users
         .lock()
@@ -174,6 +188,7 @@ fn visible_user_profiles_for_session(
                 record,
                 &admin_email,
                 &online,
+                reputation_for(&reputations, &record.email),
                 &viewer_email,
                 &friends,
                 &incoming,
@@ -195,6 +210,7 @@ fn agent_visible_profiles(
         return user_profiles(state, query, tag);
     }
     let online = online_emails(state);
+    let reputations = db_reputation_map(state)?;
     let users = state
         .users
         .lock()
@@ -208,7 +224,12 @@ fn agent_visible_profiles(
     let Some(record) = users.users.get(&agent.email) else {
         return Ok(Vec::new());
     };
-    let profile = public_profile_from_record_with_online(record, &admin_email, &online);
+    let profile = public_profile_from_record_with_online_and_reputation(
+        record,
+        &admin_email,
+        &online,
+        reputation_for(&reputations, &record.email),
+    );
     if profile_matches(&profile, query.as_deref(), tag.as_deref()) {
         Ok(vec![profile])
     } else {
@@ -299,13 +320,20 @@ fn ensure_user_agent_fields(
 fn public_profile_from_record(state: &AppState, record: &UserRecord) -> PublicUserProfile {
     let online = online_emails(state);
     let admin_email = normalize_email(&state.config.admin_email);
-    public_profile_from_record_with_online(record, &admin_email, &online)
+    let reputation = db_reputation_summary_for(state, &record.email).unwrap_or_default();
+    public_profile_from_record_with_online_and_reputation(
+        record,
+        &admin_email,
+        &online,
+        reputation,
+    )
 }
 
-fn public_profile_from_record_with_online(
+fn public_profile_from_record_with_online_and_reputation(
     record: &UserRecord,
     admin_email: &str,
     online: &HashMap<String, usize>,
+    reputation: ReputationSummary,
 ) -> PublicUserProfile {
     let email = normalize_email(&record.email);
     let is_admin = email == admin_email;
@@ -319,6 +347,8 @@ fn public_profile_from_record_with_online(
         provider,
         profile: record.profile.clone(),
         tags: public_tags_for_record(record, is_admin),
+        reputation: reputation.reputation,
+        ratings_count: reputation.ratings_count,
         friend_code: record.intro_code.clone(),
         intro_code: record.intro_code.clone(),
         is_public: record.is_public,
@@ -340,11 +370,17 @@ fn public_profile_from_record_for_viewer(
     record: &UserRecord,
     admin_email: &str,
     online: &HashMap<String, usize>,
+    reputation: ReputationSummary,
     viewer_email: &str,
     viewer_friends: &[String],
     viewer_incoming: &[String],
 ) -> PublicUserProfile {
-    let mut profile = public_profile_from_record_with_online(record, admin_email, online);
+    let mut profile = public_profile_from_record_with_online_and_reputation(
+        record,
+        admin_email,
+        online,
+        reputation,
+    );
     let email = normalize_email(&record.email);
     let viewer_email = normalize_email(viewer_email);
     if email != viewer_email {
@@ -373,12 +409,15 @@ fn synthetic_admin_profile(
     state: &AppState,
     online: &HashMap<String, usize>,
     admin_email: &str,
+    reputation: ReputationSummary,
 ) -> PublicUserProfile {
     PublicUserProfile {
         email: state.config.admin_email.clone(),
         provider: AuthProvider::Password,
         profile: "Administrator".to_string(),
         tags: vec![ADMIN_TAG.to_string()],
+        reputation: reputation.reputation,
+        ratings_count: reputation.ratings_count,
         friend_code: String::new(),
         intro_code: String::new(),
         is_public: false,
@@ -390,6 +429,16 @@ fn synthetic_admin_profile(
         last_login_at: 0,
         ban_expires_at: None,
     }
+}
+
+fn reputation_for(
+    reputations: &HashMap<String, ReputationSummary>,
+    email: &str,
+) -> ReputationSummary {
+    reputations
+        .get(&normalize_email(email))
+        .cloned()
+        .unwrap_or_default()
 }
 
 fn profile_matches(profile: &PublicUserProfile, query: Option<&str>, tag: Option<&str>) -> bool {
