@@ -1,5 +1,7 @@
 # Architecture
 
+Language: [English](ARCHITECTURE.md) | [简体中文](ARCHITECTURE.zh-CN.md)
+
 `humen-mcp` is a broker between agents and humans.
 
 1. Agent calls MCP `tools/call` for `ask_humen`.

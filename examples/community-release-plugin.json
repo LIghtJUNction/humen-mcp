@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "community-release",
+  "name": "Community Release",
+  "version": "0.1.0",
+  "description": "Release review templates, routing hints, scoring rules, and an external webhook channel.",
+  "author": "community",
+  "request_templates": [
+    {
+      "id": "ship-check",
+      "title": "Ship {{version}}",
+      "description": "Ask a human to decide whether a release can ship.",
+      "kind": "judgment",
+      "prompt_template": "Review {{project}} {{version}} and decide whether it can ship.",
+      "steps": [
+        "Check test status for {{project}}.",
+        "Check rollback plan for {{version}}."
+      ],
+      "tags": ["#release"],
+      "timeout_seconds": 300
+    }
+  ],
+  "route_strategies": [
+    {
+      "id": "trusted-online",
+      "title": "Trusted online reviewers",
+      "description": "Prefer online humans with release experience.",
+      "tags": ["#release"],
+      "prefer_online": true,
+      "minimum_reputation": 7
+    }
+  ],
+  "scoring_rules": [
+    {
+      "id": "release-risk",
+      "title": "Release risk rubric",
+      "description": "Score the answer against test, rollback, and user-impact evidence.",
+      "weight": 1.0,
+      "rubric": [
+        "Tests passed",
+        "Rollback is clear",
+        "User impact is understood"
+      ]
+    }
+  ],
+  "channels": [
+    {
+      "id": "review-webhook",
+      "title": "Review webhook",
+      "description": "Forward selected review tasks to an external community channel.",
+      "kind": "webhook",
+      "endpoint": "https://example.invalid/humen-review",
+      "config_schema": {
+        "type": "object",
+        "required": ["secret"],
+        "properties": {
+          "secret": { "type": "string" }
+        }
+      }
+    }
+  ]
+}

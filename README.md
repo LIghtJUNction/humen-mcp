@@ -10,9 +10,9 @@
   </p>
 
   <p>
-    <a href="#english">English</a>
+    <a href="README.md">English</a>
     ·
-    <a href="#中文速览">简体中文</a>
+    <a href="README.zh-CN.md">简体中文</a>
     ·
     <a href="#why-people-care">Why it matters</a>
     ·
@@ -39,17 +39,11 @@
   <a href="#security-model"><img alt="Passkeys and OAuth" src="https://img.shields.io/badge/auth-Passkeys%20%2B%20GitHub%20OAuth-2ea44f" /></a>
 </p>
 
-## English
-
 `humen-mcp` lets an agent ask a logged-in person for help without leaving the MCP loop. The agent calls a tool, the server creates a task, the human answers in the web UI, and the agent receives the result.
 
 Use it when a workflow needs a person for one small but important step: choosing between options, reading an image, checking a website, retrieving an account-bound code, approving a risky action, or escalating an ambiguous decision.
 
-## 中文速览
-
-`humen-mcp` 是一个 human-in-the-loop MCP 服务器：智能体发起 MCP 工具调用，服务端把它变成一个人类任务，登录用户在 Web UI 里回答，智能体拿到结果继续执行。
-
-它适合那些“不该完全自动化，但又不想打断整个工作流”的步骤：选择确认、图片审阅、账号内操作、短信验证码、风险动作审批、模糊问题升级。
+For Simplified Chinese documentation, see [README.zh-CN.md](README.zh-CN.md).
 
 ## Online Panel
 
@@ -76,6 +70,7 @@ Email/password login is only for the administrator account. The admin password i
 | Needs a real account holder | A logged-in human workbench with identity, presence, and answer history |
 | Cannot wait inside one request | Async task creation plus later polling with `read_humen_replies` |
 | Needs the right human | Profiles, tags, friends, online status, and reputation-aware discovery |
+| Needs new collaboration patterns | Community plugin manifests for request templates, route strategies, scoring rules, and third-party channels |
 | Needs operational deployment | Rust server, React UI, systemd, nginx, AUR packages, and release workflow |
 
 ## How It Feels
@@ -102,6 +97,7 @@ The important design choice: the agent does not directly control a person. It cr
 | Blocking and async asks | Use `ask_humen` when the agent should wait; use `ask_humen_*_async` when the agent should keep moving. |
 | Typed tasks | Text, choice, yes/no judgment, image review, and step-by-step tasks get clearer UI than a single free-form prompt. |
 | Human directory | Agents can discover online humans by profile, tag, friend graph, and reputation, subject to server visibility rules. |
+| Community plugins | Load request templates, route strategies, scoring rules, and external channel declarations from plugin manifests. |
 | Agent-bound identity | Each human has an agent secret, so MCP requests are tied back to a specific human account instead of a global anonymous token. |
 | Practical server packaging | The repo includes nginx routing, systemd units, Arch/AUR packaging, release artifacts, and admin-triggered updates. |
 
@@ -203,6 +199,7 @@ The rest is folded so the README stays readable. Open only what you need.
 - Bun/Vite/React frontend in the `humen-mcp-webui` git submodule.
 - Blocking and async human request tools for text, choice, yes/no judgment, image review, and step-by-step tasks.
 - Per-human agent access secrets, public profiles, tags, friends, reputation, reports, and online presence.
+- Community plugin manifests loaded from `HUMEN_PLUGIN_DIR`, with SDK types published as `humen-mcp-sdk`.
 - AUR packages for Arch Linux:
   - `humen-mcp-git`: builds from GitHub source.
   - `humen-mcp-bin`: installs a GitHub Release tarball.
@@ -290,6 +287,8 @@ Current tools include:
 | `list_humen_tags` | List visible `#tag` usage counts. |
 | `rate_humen` | Rate a human from 0 to 10; feedback is weighted by the rater's own reputation. |
 | `report_humen` | Report a human to the administrator mailbox and apply a zero-score weighted feedback signal from this actor. |
+| `list_humen_plugins` | List loaded community plugins and their request templates, route strategies, scoring rules, and channels. |
+| `create_humen_request_from_template` | Create an async human request from a plugin request template. |
 
 `approve`, `judge`, and `feedback` are blocking convenience wrappers over `ask_humen`. Use the `ask_humen_*_async` tools and `read_humen_replies` when the agent should continue work while the human answers.
 
@@ -352,6 +351,21 @@ Example payloads are in `examples/`; `examples/README.md` maps each file to the
 current MCP tool schema.
 
 Tags are normalized to lowercase `#tag` values. `#admin` is a reserved tag: clients and agents cannot assign it through profile updates or task text, and the backend only derives it for the configured admin identity.
+
+### Community Plugins
+
+Plugins are declarative JSON or TOML manifests loaded at startup from
+`HUMEN_PLUGIN_DIR`. A manifest can contribute request templates, route
+strategies, scoring rules, and third-party channel declarations. The server
+exposes loaded plugins through `list_humen_plugins`, and agents can create an
+async request from a template with `create_humen_request_from_template`.
+
+Template ids use `plugin-id/template-id`. Template text supports simple
+`{{variable}}` substitution from the tool call's `variables` object. Plugin
+authors can use the published `humen-mcp-sdk` crate to build and validate
+manifests before distribution.
+
+Example manifest: [examples/community-release-plugin.json](examples/community-release-plugin.json).
 
 </details>
 
@@ -432,6 +446,7 @@ HUMEN_TRASH_RETENTION_SECONDS=604800
 HUMEN_CLEANUP_INTERVAL_SECONDS=60
 HUMEN_SELF_UPDATE_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start humen-mcp-self-update.service
 HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=30
+HUMEN_PLUGIN_DIR=/etc/humen-mcp/plugins
 ```
 
 Production note: after AUR install, make sure `/etc/humen-mcp.env` uses the packaged web directory:

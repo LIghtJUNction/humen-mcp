@@ -1,8 +1,8 @@
-# MCP Examples
+# MCP 示例
 
-Language: [English](README.md) | [简体中文](README.zh-CN.md)
+语言：[English](README.md) | [简体中文](README.zh-CN.md)
 
-Use these payloads with `POST /mcp` and an agent secret header:
+这些 payload 可配合 `POST /mcp` 和 agent secret header 使用：
 
 ```bash
 curl -fsS http://127.0.0.1:8787/mcp \
@@ -11,9 +11,9 @@ curl -fsS http://127.0.0.1:8787/mcp \
   --data @examples/mcp-tools-list.json
 ```
 
-The examples mirror the tool schemas in `src/mcp.rs`.
+示例文件与 `src/mcp.rs` 中的工具 schema 保持一致。
 
-| File | Tool or method |
+| 文件 | 工具或方法 |
 | --- | --- |
 | `mcp-initialize.json` | `initialize` |
 | `mcp-tools-list.json` | `tools/list` |
@@ -21,7 +21,7 @@ The examples mirror the tool schemas in `src/mcp.rs`.
 | `mcp-judge.json` | `judge` |
 | `mcp-feedback.json` | `feedback` |
 | `mcp-ask-choice.json` | `ask_humen` |
-| `mcp-ask-image-base64.json` | `ask_humen` image review |
+| `mcp-ask-image-base64.json` | `ask_humen` 图片审阅 |
 | `mcp-ask-text-async.json` | `ask_humen_text_async` |
 | `mcp-ask-judgment-async.json` | `ask_humen_judgment_async` |
 | `mcp-read-replies.json` | `read_humen_replies` |
@@ -35,6 +35,4 @@ The examples mirror the tool schemas in `src/mcp.rs`.
 | `mcp-rate-humen.json` | `rate_humen` |
 | `mcp-report-humen.json` | `report_humen` |
 
-`community-release-plugin.json` is a plugin manifest example, not an MCP
-JSON-RPC payload. Copy it into a directory and set `HUMEN_PLUGIN_DIR` to that
-directory before starting the server.
+`community-release-plugin.json` 是插件 manifest 示例，不是 MCP JSON-RPC payload。把它复制到一个目录，并在启动服务前把 `HUMEN_PLUGIN_DIR` 指向该目录。

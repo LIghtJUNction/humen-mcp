@@ -1,0 +1,16 @@
+[package]
+name = "humen-mcp-sdk"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "SDK types for humen-mcp community plugins."
+repository = "https://github.com/LIghtJUNction/humen-mcp"
+homepage = "https://github.com/LIghtJUNction/humen-mcp"
+documentation = "https://docs.rs/humen-mcp-sdk"
+readme = "README.md"
+keywords = ["mcp", "human-in-the-loop", "plugins", "sdk"]
+categories = ["api-bindings", "development-tools"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

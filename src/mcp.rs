@@ -82,6 +82,16 @@ async fn mcp(
                     "inputSchema": read_humen_replies_schema()
                 },
                 {
+                    "name": "list_humen_plugins",
+                    "description": "List loaded community plugins, including request templates, route strategies, scoring rules, and third-party channels.",
+                    "inputSchema": list_humen_plugins_schema()
+                },
+                {
+                    "name": "create_humen_request_from_template",
+                    "description": "Create a human request from a community plugin request template and return immediately with request_id.",
+                    "inputSchema": create_humen_request_from_template_schema()
+                },
+                {
                     "name": "create_humen_task",
                     "description": "Create a visible AI task for the human account attached to this agent secret.",
                     "inputSchema": create_humen_task_schema()
@@ -197,6 +207,21 @@ async fn call_tool(
                 id,
                 json!({ "replies": db_read_humen_replies(&state, &agent.email, args)? }),
             )))
+        }
+        "list_humen_plugins" => Ok(Json(mcp_text_result(id, state.plugins.plugin_summary()))),
+        "create_humen_request_from_template" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: TemplateRequestArgs = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!(
+                    "invalid create_humen_request_from_template arguments: {err}"
+                ))
+            })?;
+            let create = create_request_from_template_args(&state.plugins, args)?;
+            create_humen_request(state, agent, id, create, true).await
         }
         "create_humen_task" => {
             let arguments = payload

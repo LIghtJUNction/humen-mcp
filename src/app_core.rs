@@ -92,6 +92,9 @@ struct Config {
         default_value_t = 120
     )]
     self_update_timeout_seconds: u64,
+
+    #[arg(long, env = "HUMEN_PLUGIN_DIR", default_value = "")]
+    plugin_dir: String,
 }
 
 #[derive(Clone)]
@@ -109,6 +112,7 @@ struct AppState {
     events: broadcast::Sender<ServerEvent>,
     shutdown: broadcast::Sender<()>,
     self_update_running: Arc<AtomicBool>,
+    plugins: Arc<PluginRegistry>,
     http: Client,
     webauthn: Option<Arc<Webauthn>>,
 }
@@ -124,6 +128,7 @@ impl AppState {
         }
         let admin_settings = users.admin_settings.clone();
         let db = open_db(&config.db_file)?;
+        let plugins = load_plugins(config.plugin_dir.trim());
         let webauthn = match build_webauthn(&config.public_base_url) {
             Ok(webauthn) => Some(Arc::new(webauthn)),
             Err(err) => {
@@ -145,6 +150,7 @@ impl AppState {
             events,
             shutdown,
             self_update_running: Arc::new(AtomicBool::new(false)),
+            plugins: Arc::new(plugins),
             http: Client::new(),
             webauthn,
         };

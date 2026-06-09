@@ -21,6 +21,7 @@ mod tests {
             cleanup_interval_seconds: 60,
             self_update_command: String::new(),
             self_update_timeout_seconds: 120,
+            plugin_dir: String::new(),
         })
         .unwrap()
     }
@@ -156,6 +157,74 @@ mod tests {
         assert!(tool_names.contains(&"approve"));
         assert!(tool_names.contains(&"judge"));
         assert!(tool_names.contains(&"feedback"));
+        assert!(tool_names.contains(&"list_humen_plugins"));
+        assert!(tool_names.contains(&"create_humen_request_from_template"));
+    }
+
+    #[test]
+    fn plugin_registry_loads_templates_and_renders_request_arguments() {
+        let registry = PluginRegistry {
+            plugins: vec![LoadedPlugin {
+                source: "memory".to_string(),
+                manifest: HumenPluginManifest {
+                    id: "release".to_string(),
+                    name: "Release".to_string(),
+                    request_templates: vec![RequestTemplate {
+                        id: "ship-check".to_string(),
+                        title: "Ship {{version}}".to_string(),
+                        description: "Release gate".to_string(),
+                        kind: HumenTaskKind::Judgment,
+                        prompt_template: "Can {{version}} ship for {{project}}?".to_string(),
+                        steps: vec!["Check {{project}} tests".to_string()],
+                        timeout_seconds: Some(120),
+                        ..Default::default()
+                    }],
+                    route_strategies: vec![RouteStrategy {
+                        id: "online".to_string(),
+                        title: "Online".to_string(),
+                        ..Default::default()
+                    }],
+                    scoring_rules: vec![ScoringRule {
+                        id: "risk".to_string(),
+                        title: "Risk".to_string(),
+                        ..Default::default()
+                    }],
+                    channels: vec![ThirdPartyChannel {
+                        id: "webhook".to_string(),
+                        title: "Webhook".to_string(),
+                        kind: "webhook".to_string(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            }],
+        };
+
+        let create = create_request_from_template_args(
+            &registry,
+            TemplateRequestArgs {
+                template: "release/ship-check".to_string(),
+                variables: HashMap::from([
+                    ("version".to_string(), json!("v1.2.3")),
+                    ("project".to_string(), json!("humen-mcp")),
+                ]),
+                title: None,
+                prompt: None,
+                choices: Vec::new(),
+                steps: Vec::new(),
+                timeout_seconds: None,
+                background: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(create.kind, TaskKind::Judgment);
+        assert_eq!(create.title, "Ship v1.2.3");
+        assert_eq!(create.prompt, "Can v1.2.3 ship for humen-mcp?");
+        assert_eq!(create.steps, vec!["Check humen-mcp tests"]);
+        assert_eq!(create.timeout_seconds, 120);
+        assert!(create.background);
+        assert!(registry.plugin_summary()["counts"]["channels"].as_u64().unwrap() == 1);
     }
 
     #[test]
@@ -355,7 +424,7 @@ mod tests {
             users.insert(admin);
         }
 
-        upsert_github_user(&state, "admin-local").unwrap();
+        upsert_github_user(&state, "123", Some("admin-local"), "admin-local").unwrap();
         let profiles = user_profiles(&state, None, None).unwrap();
 
         assert_eq!(profiles.len(), 1);

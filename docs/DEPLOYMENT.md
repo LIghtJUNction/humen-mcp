@@ -1,5 +1,7 @@
 # Deployment
 
+Language: [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
+
 Target: Arch Linux server, served under `https://your-domain.example/mcp`.
 
 Public hosted instance:

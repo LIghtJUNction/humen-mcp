@@ -196,6 +196,7 @@ fn default_env_lines() -> Vec<String> {
         "HUMEN_GITHUB_API_TOKEN=",
         "HUMEN_SELF_UPDATE_COMMAND=",
         "HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=120",
+        "HUMEN_PLUGIN_DIR=",
     ]
     .into_iter()
     .map(str::to_string)

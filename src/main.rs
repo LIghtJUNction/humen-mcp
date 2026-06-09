@@ -26,6 +26,9 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use clap::{Args, Parser, Subcommand};
 use dashmap::DashMap;
 use futures_util::StreamExt;
+use humen_mcp_sdk::{HumenPluginManifest, HumenTaskKind, RequestTemplate};
+#[cfg(test)]
+use humen_mcp_sdk::{RouteStrategy, ScoringRule, ThirdPartyChannel};
 use qrcode::{render::svg, QrCode};
 use rand::{distr::Alphanumeric, Rng};
 use reqwest::Client;
@@ -68,6 +71,7 @@ include!("self_update.rs");
 include!("weixin.rs");
 include!("ws.rs");
 include!("storage.rs");
+include!("plugins.rs");
 include!("mcp.rs");
 include!("profiles.rs");
 include!("utils.rs");
