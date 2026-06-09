@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": 16,
+  "method": "tools/call",
+  "params": {
+    "name": "judge",
+    "arguments": {
+      "title": "Judge regression risk",
+      "prompt": "Does this diff look safe enough to merge without another review pass?",
+      "steps": [
+        "Check the changed files and test output.",
+        "Answer yes only if the behavior matches the requested change."
+      ],
+      "timeout_seconds": 300
+    }
+  }
+}

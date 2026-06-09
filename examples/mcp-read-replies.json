@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "tools/call",
+  "params": {
+    "name": "read_humen_replies",
+    "arguments": {
+      "request_id": "00000000-0000-0000-0000-000000000000",
+      "unread_only": true,
+      "mark_read": true,
+      "limit": 10
+    }
+  }
+}

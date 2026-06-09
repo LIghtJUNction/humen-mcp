@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 14,
+  "method": "tools/call",
+  "params": {
+    "name": "report_humen",
+    "arguments": {
+      "reported_email": "operator@example.com",
+      "reason": "Repeatedly answered without following the supplied verification steps."
+    }
+  }
+}

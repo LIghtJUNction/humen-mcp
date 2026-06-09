@@ -70,6 +70,9 @@ struct Config {
     #[arg(long, env = "HUMEN_GITHUB_CLIENT_SECRET")]
     github_client_secret: Option<String>,
 
+    #[arg(long, env = "HUMEN_GITHUB_API_TOKEN")]
+    github_api_token: Option<String>,
+
     #[arg(
         long,
         env = "HUMEN_TRASH_RETENTION_SECONDS",

@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": 15,
+  "method": "tools/call",
+  "params": {
+    "name": "approve",
+    "arguments": {
+      "title": "Approve production deploy",
+      "prompt": "May the agent deploy version 0.1.5 to production now?",
+      "steps": [
+        "Review the linked deploy summary.",
+        "Approve only if the smoke test and rollback plan look acceptable."
+      ],
+      "timeout_seconds": 300
+    }
+  }
+}

@@ -141,7 +141,7 @@ fn user_profiles(
         }
     }
 
-    profiles.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.email.cmp(&b.email)));
+    sort_profiles_by_reputation(&mut profiles);
     Ok(profiles)
 }
 
@@ -196,7 +196,7 @@ fn visible_user_profiles_for_session(
         })
         .filter(|profile| profile_matches(profile, query.as_deref(), tag.as_deref()))
         .collect();
-    profiles.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.email.cmp(&b.email)));
+    sort_profiles_by_reputation(&mut profiles);
     Ok(profiles)
 }
 
@@ -245,8 +245,24 @@ fn agent_visible_profiles(
         })
         .filter(|profile| profile_matches(profile, query.as_deref(), tag.as_deref()))
         .collect();
-    profiles.sort_by(|a, b| b.online.cmp(&a.online).then_with(|| a.email.cmp(&b.email)));
+    sort_profiles_by_reputation(&mut profiles);
     Ok(profiles)
+}
+
+fn sort_profiles_by_reputation(profiles: &mut [PublicUserProfile]) {
+    profiles.sort_by(|left, right| {
+        right
+            .online
+            .cmp(&left.online)
+            .then_with(|| {
+                right
+                    .reputation
+                    .partial_cmp(&left.reputation)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| right.ratings_count.cmp(&left.ratings_count))
+            .then_with(|| left.email.cmp(&right.email))
+    });
 }
 
 fn agent_can_see_record(
@@ -380,6 +396,7 @@ fn public_profile_from_record_with_online_and_reputation(
         tags: public_tags_for_record(record, is_admin),
         reputation: reputation.reputation,
         ratings_count: reputation.ratings_count,
+        reputation_breakdown: reputation.reputation_breakdown,
         friend_code: record.intro_code.clone(),
         intro_code: record.intro_code.clone(),
         is_public: record.is_public,
@@ -449,6 +466,7 @@ fn synthetic_admin_profile(
         tags: vec![ADMIN_TAG.to_string()],
         reputation: reputation.reputation,
         ratings_count: reputation.ratings_count,
+        reputation_breakdown: reputation.reputation_breakdown,
         friend_code: String::new(),
         intro_code: String::new(),
         is_public: false,
@@ -524,6 +542,8 @@ fn oauth_channel_enabled(settings: &AdminSettings, provider: &str) -> bool {
 }
 
 fn sanitize_admin_settings(mut settings: AdminSettings) -> AdminSettings {
+    settings.github_api_token = normalize_optional_value(settings.github_api_token.as_deref());
+    settings.github_api_token_configured = settings.github_api_token.is_some();
     settings.agent_secret_prefix =
         normalize_optional_value(settings.agent_secret_prefix.as_deref())
             .or_else(default_agent_secret_prefix);
@@ -570,6 +590,30 @@ fn sanitize_admin_settings(mut settings: AdminSettings) -> AdminSettings {
     settings
         .webhooks
         .retain(|webhook| !webhook.url.is_empty() || webhook.kind == "wechat");
+    settings
+}
+
+fn merge_admin_secret_settings(
+    state: &AppState,
+    settings: &mut AdminSettings,
+) -> Result<(), ApiError> {
+    let current_token = state
+        .admin_settings
+        .lock()
+        .map_err(|_| ApiError::internal("settings lock poisoned"))?
+        .github_api_token
+        .clone();
+    settings.github_api_token = match settings.github_api_token.as_deref() {
+        None => current_token,
+        Some(value) if value.trim().is_empty() => None,
+        Some(value) => Some(value.trim().to_string()),
+    };
+    Ok(())
+}
+
+fn admin_settings_response(state: &AppState, mut settings: AdminSettings) -> AdminSettings {
+    settings.github_api_token_configured = effective_github_api_token(state).is_some();
+    settings.github_api_token = None;
     settings
 }
 

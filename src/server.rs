@@ -62,6 +62,7 @@ fn api_router() -> Router<AppState> {
         )
         .route("/auth/oauth/github/start", get(github_oauth_start))
         .route("/auth/oauth/github/callback", get(github_oauth_callback))
+        .route("/public/leaderboard", get(list_public_leaderboard))
         .route("/me", get(me))
         .route("/me/profile", get(me_profile).post(update_me_profile))
         .route("/passkeys", get(list_passkeys))
@@ -192,6 +193,7 @@ fn default_env_lines() -> Vec<String> {
         "HUMEN_CLEANUP_INTERVAL_SECONDS=60",
         "HUMEN_GITHUB_CLIENT_ID=",
         "HUMEN_GITHUB_CLIENT_SECRET=",
+        "HUMEN_GITHUB_API_TOKEN=",
         "HUMEN_SELF_UPDATE_COMMAND=",
         "HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=120",
     ]

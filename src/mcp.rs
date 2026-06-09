@@ -37,6 +37,21 @@ async fn mcp(
         "tools/list" => json!({
             "tools": [
                 {
+                    "name": "approve",
+                    "description": "Ask the attached human to approve or deny a proposed action and wait for the answer.",
+                    "inputSchema": approve_schema()
+                },
+                {
+                    "name": "judge",
+                    "description": "Ask the attached human for a yes/no judgment and wait for the answer.",
+                    "inputSchema": judge_schema()
+                },
+                {
+                    "name": "feedback",
+                    "description": "Ask the attached human for short free-form feedback and wait for the answer.",
+                    "inputSchema": feedback_schema()
+                },
+                {
                     "name": "ask_humen",
                     "description": "Ask a logged-in human to complete a simple task and wait for the answer. For non-blocking background calls, prefer the ask_humen_*_async tools.",
                     "inputSchema": ask_humen_schema()
@@ -99,12 +114,12 @@ async fn mcp(
                 },
                 {
                     "name": "rate_humen",
-                    "description": "Rate a human from 0 to 10. Reputation is the average of ratings; unrated humans start at 5.",
+                    "description": "Rate a human from 0 to 10. Reputation blends GitHub seed priors with feedback weighted by the rater's own reputation; unrated humans start at 5.",
                     "inputSchema": rate_humen_schema()
                 },
                 {
                     "name": "report_humen",
-                    "description": "Report a human to the administrator mailbox and reduce their reputation through a zero rating from this agent's owner.",
+                    "description": "Report a human to the administrator mailbox and apply a zero-score feedback signal weighted by this actor's reputation.",
                     "inputSchema": report_humen_schema()
                 }
             ]
@@ -138,6 +153,17 @@ async fn call_tool(
         .and_then(Value::as_str)
         .ok_or_else(|| ApiError::bad_request("tools/call params.name is required"))?;
     match name {
+        "approve" => {
+            call_blocking_request_shortcut(state, agent, id, &payload, name, TaskKind::Judgment)
+                .await
+        }
+        "judge" => {
+            call_blocking_request_shortcut(state, agent, id, &payload, name, TaskKind::Judgment)
+                .await
+        }
+        "feedback" => {
+            call_blocking_request_shortcut(state, agent, id, &payload, name, TaskKind::Text).await
+        }
         "ask_humen" => {
             let create = parse_humen_request_arguments(&payload, name, None)?;
             create_humen_request(state, agent, id, create, false).await
@@ -252,6 +278,28 @@ async fn call_tool(
         }
         _ => Ok(Json(mcp_error(id, -32602, "unknown tool"))),
     }
+}
+
+async fn call_blocking_request_shortcut(
+    state: AppState,
+    agent: AgentContext,
+    id: Option<Value>,
+    payload: &McpRequest,
+    tool_name: &str,
+    kind: TaskKind,
+) -> Result<Json<Value>, ApiError> {
+    let create = parse_blocking_shortcut_arguments(payload, tool_name, kind)?;
+    create_humen_request(state, agent, id, create, false).await
+}
+
+fn parse_blocking_shortcut_arguments(
+    payload: &McpRequest,
+    tool_name: &str,
+    kind: TaskKind,
+) -> Result<CreateHumanRequest, ApiError> {
+    let mut create = parse_humen_request_arguments(payload, tool_name, Some(kind))?;
+    create.background = false;
+    Ok(create)
 }
 
 fn parse_humen_request_arguments(
@@ -475,6 +523,44 @@ fn mcp_text_result(id: Option<Value>, value: Value) -> Value {
                 "type": "text",
                 "text": serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string())
             }]
+        }
+    })
+}
+
+fn approve_schema() -> Value {
+    human_shortcut_schema(
+        "Describe the action that needs approval, including relevant context and risk.",
+    )
+}
+
+fn judge_schema() -> Value {
+    human_shortcut_schema("Describe the yes/no judgment the human should make.")
+}
+
+fn feedback_schema() -> Value {
+    human_shortcut_schema("Describe the work or decision that needs human feedback.")
+}
+
+fn human_shortcut_schema(prompt_description: &'static str) -> Value {
+    json!({
+        "type": "object",
+        "required": ["title", "prompt"],
+        "properties": {
+            "title": { "type": "string" },
+            "prompt": {
+                "type": "string",
+                "description": prompt_description
+            },
+            "steps": {
+                "type": "array",
+                "items": { "type": "string" }
+            },
+            "timeout_seconds": {
+                "type": "integer",
+                "minimum": 30,
+                "maximum": 86400,
+                "default": 60
+            }
         }
     })
 }

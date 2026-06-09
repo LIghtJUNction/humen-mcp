@@ -50,29 +50,67 @@ async fn list_leaderboard(
 ) -> Result<Json<Vec<HumanLeaderboardEntry>>, ApiError> {
     let session = require_session(&state, &headers)?;
     let visible_profiles = visible_user_profiles_for_session(&state, &session.user.email, None, None)?;
-    let mut profiles_by_email = HashMap::new();
-    for profile in visible_profiles {
-        profiles_by_email.insert(normalize_email(&profile.email), profile);
+    Ok(Json(leaderboard_entries_for_profiles(
+        &state,
+        visible_profiles,
+    )?))
+}
+
+async fn list_public_leaderboard(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<HumanLeaderboardEntry>>, ApiError> {
+    let public_profiles: Vec<_> = user_profiles(&state, None, None)?
+        .into_iter()
+        .filter(|profile| profile.is_public)
+        .collect();
+    Ok(Json(leaderboard_entries_for_profiles(
+        &state,
+        public_profiles,
+    )?))
+}
+
+fn leaderboard_entries_for_profiles(
+    state: &AppState,
+    profiles: Vec<PublicUserProfile>,
+) -> Result<Vec<HumanLeaderboardEntry>, ApiError> {
+    let mut stats_by_email = HashMap::new();
+    for stat in db_list_human_leaderboard(state)? {
+        stats_by_email.insert(normalize_email(&stat.email), stat);
     }
 
-    let mut entries = Vec::new();
-    for stat in db_list_human_leaderboard(&state)? {
-        let Some(profile) = profiles_by_email.get(&normalize_email(&stat.email)) else {
-            continue;
-        };
-        entries.push(HumanLeaderboardEntry {
+    let mut entries: Vec<_> = profiles
+        .into_iter()
+        .map(|profile| {
+            let stat = stats_by_email.remove(&normalize_email(&profile.email));
+            HumanLeaderboardEntry {
             email: profile.email.clone(),
-            requests_handled: stat.requests_handled,
-            sent_tokens: stat.sent_tokens,
-            latest_answered_at: stat.latest_answered_at,
+                requests_handled: stat.as_ref().map(|stat| stat.requests_handled).unwrap_or(0),
+                sent_tokens: stat.as_ref().map(|stat| stat.sent_tokens).unwrap_or(0),
+                latest_answered_at: stat.and_then(|stat| stat.latest_answered_at),
             reputation: profile.reputation,
             ratings_count: profile.ratings_count,
-            profile: profile.profile.clone(),
-            tags: profile.tags.clone(),
+                reputation_breakdown: profile.reputation_breakdown,
+                profile: profile.profile,
+                tags: profile.tags,
             online: profile.online,
-        });
-    }
-    Ok(Json(entries))
+            }
+        })
+        .collect();
+    entries.sort_by(|left, right| {
+        right
+            .requests_handled
+            .cmp(&left.requests_handled)
+            .then_with(|| right.sent_tokens.cmp(&left.sent_tokens))
+            .then_with(|| {
+                right
+                    .reputation
+                    .partial_cmp(&left.reputation)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| right.ratings_count.cmp(&left.ratings_count))
+            .then_with(|| left.email.cmp(&right.email))
+    });
+    Ok(entries)
 }
 
 async fn list_agent_tasks(
@@ -455,7 +493,7 @@ fn relation_profiles(
             ));
         }
     }
-    profiles.sort_by(|a, b| a.email.cmp(&b.email));
+    sort_profiles_by_reputation(&mut profiles);
     Ok(profiles)
 }
 
@@ -617,7 +655,7 @@ async fn admin_settings(
         .lock()
         .map_err(|_| ApiError::internal("settings lock poisoned"))?
         .clone();
-    Ok(Json(settings))
+    Ok(Json(admin_settings_response(&state, settings)))
 }
 
 async fn admin_update_settings(
@@ -626,6 +664,8 @@ async fn admin_update_settings(
     Json(payload): Json<AdminSettings>,
 ) -> Result<Json<AdminSettings>, ApiError> {
     require_admin(&state, &headers)?;
+    let mut payload = payload;
+    merge_admin_secret_settings(&state, &mut payload)?;
     let sanitized = sanitize_admin_settings(payload);
     {
         let mut settings = state
@@ -635,7 +675,7 @@ async fn admin_update_settings(
         *settings = sanitized.clone();
     }
     persist_admin_settings(&state, &sanitized)?;
-    Ok(Json(sanitized))
+    Ok(Json(admin_settings_response(&state, sanitized)))
 }
 
 async fn answer_request(

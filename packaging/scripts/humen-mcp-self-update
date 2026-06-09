@@ -5,6 +5,8 @@ aur_user="${HUMEN_UPDATE_AUR_USER:-arch}"
 helper="${HUMEN_UPDATE_HELPER:-paru}"
 package="${HUMEN_UPDATE_PACKAGE:-}"
 service="${HUMEN_UPDATE_SERVICE:-humen-mcp.service}"
+default_path="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin"
+run_path="${PATH:-${default_path}}"
 
 if [[ -z "${package}" ]]; then
   if pacman -Q humen-mcp-bin >/dev/null 2>&1; then
@@ -16,14 +18,21 @@ if [[ -z "${package}" ]]; then
   fi
 fi
 
-if ! id "${aur_user}" >/dev/null 2>&1; then
-  echo "AUR user '${aur_user}' does not exist. Set HUMEN_UPDATE_AUR_USER in /etc/humen-mcp-update.env." >&2
+case "${package}" in
+  humen-mcp-bin | humen-mcp-git) ;;
+  *)
+    echo "Unsupported package '${package}'. Set HUMEN_UPDATE_PACKAGE to humen-mcp-bin or humen-mcp-git." >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! "${helper}" =~ ^[A-Za-z0-9._+/-]+$ ]]; then
+  echo "Invalid AUR helper name '${helper}'." >&2
   exit 1
 fi
 
-helper_path="$(command -v "${helper}" || true)"
-if [[ -z "${helper_path}" ]]; then
-  echo "AUR helper '${helper}' was not found. Set HUMEN_UPDATE_HELPER in /etc/humen-mcp-update.env." >&2
+if ! id "${aur_user}" >/dev/null 2>&1; then
+  echo "AUR user '${aur_user}' does not exist. Set HUMEN_UPDATE_AUR_USER in /etc/humen-mcp-update.env." >&2
   exit 1
 fi
 
@@ -33,14 +42,23 @@ if [[ -z "${home}" || ! -d "${home}" ]]; then
   exit 1
 fi
 
-if ! runuser -u "${aur_user}" -- sudo -n true >/dev/null 2>&1; then
+helper_path="$(
+  runuser -u "${aur_user}" -- env HOME="${home}" PATH="${run_path}" sh -c 'command -v "$1"' sh "${helper}" || true
+)"
+if [[ -z "${helper_path}" ]]; then
+  echo "AUR helper '${helper}' was not found for '${aur_user}'. Set HUMEN_UPDATE_HELPER in /etc/humen-mcp-update.env." >&2
+  exit 1
+fi
+
+if ! runuser -u "${aur_user}" -- env HOME="${home}" PATH="${run_path}" sudo -n true >/dev/null 2>&1; then
   echo "AUR user '${aur_user}' cannot run sudo non-interactively. Configure unattended pacman privileges for the AUR helper." >&2
   exit 1
 fi
 
 echo "Updating ${package} as ${aur_user} with ${helper_path}"
-cd "${home}"
-runuser -u "${aur_user}" -- env -u GIT_DIR -u GIT_WORK_TREE HOME="${home}" "${helper_path}" -S --noconfirm "${package}"
+runuser -u "${aur_user}" -- env -u GIT_DIR -u GIT_WORK_TREE \
+  HOME="${home}" USER="${aur_user}" LOGNAME="${aur_user}" PATH="${run_path}" \
+  sh -c 'cd "$HOME" && exec "$@"' sh "${helper_path}" -S --needed --noconfirm "${package}"
 
 systemctl daemon-reload
 systemctl try-restart "${service}"

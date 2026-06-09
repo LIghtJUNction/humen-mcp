@@ -62,6 +62,7 @@ include!("server.rs");
 include!("auth.rs");
 include!("passkeys.rs");
 include!("admin_weixin.rs");
+include!("github.rs");
 include!("handlers.rs");
 include!("self_update.rs");
 include!("weixin.rs");

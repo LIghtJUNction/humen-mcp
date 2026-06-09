@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 11,
+  "method": "tools/call",
+  "params": {
+    "name": "search_humen_profiles",
+    "arguments": {
+      "q": "deployment",
+      "tag": "#ops"
+    }
+  }
+}

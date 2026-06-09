@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 13,
+  "method": "tools/call",
+  "params": {
+    "name": "rate_humen",
+    "arguments": {
+      "rated_email": "operator@example.com",
+      "score": 9,
+      "note": "Accurate and timely deployment review."
+    }
+  }
+}

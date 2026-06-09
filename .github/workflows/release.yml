@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version, e.g. 0.1.3, or auto to use Cargo.toml. The GitHub Release tag is always v<version>."
+        description: "Release version, e.g. 0.1.5, or auto to use Cargo.toml. The GitHub Release tag is always v<version>."
         required: false
         default: "auto"
         type: string

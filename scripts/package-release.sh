@@ -1,10 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.3}"
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "${script_dir}/.." && pwd)"
+cd "${repo_root}"
+
+cargo_version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+version="${1:-${cargo_version}}"
 target="${TARGET:-x86_64-unknown-linux-gnu}"
 out_dir="${OUT_DIR:-dist-release}"
 name="humen-mcp-${version}-${target}"
+
+if [[ -z "${cargo_version}" ]]; then
+  echo "Could not read package version from Cargo.toml" >&2
+  exit 1
+fi
+
+if [[ "${version}" != "${cargo_version}" ]]; then
+  echo "Version mismatch: requested ${version}, but Cargo.toml is ${cargo_version}" >&2
+  exit 1
+fi
+
+if [[ ! -f humen-mcp-webui/package.json ]]; then
+  echo "humen-mcp-webui submodule is missing. Run: git submodule update --init humen-mcp-webui" >&2
+  exit 1
+fi
 
 rm -rf "${out_dir:?}/${name}" "${out_dir:?}/${name}.tar.gz"
 mkdir -p "${out_dir}/${name}/web"

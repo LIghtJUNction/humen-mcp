@@ -85,6 +85,7 @@ struct HumanLeaderboardEntry {
     latest_answered_at: Option<u64>,
     reputation: f64,
     ratings_count: u64,
+    reputation_breakdown: ReputationBreakdown,
     profile: String,
     tags: Vec<String>,
     online: bool,
@@ -150,6 +151,7 @@ struct HumanReport {
 struct ReputationSummary {
     reputation: f64,
     ratings_count: u64,
+    reputation_breakdown: ReputationBreakdown,
 }
 
 impl Default for ReputationSummary {
@@ -157,8 +159,50 @@ impl Default for ReputationSummary {
         Self {
             reputation: 5.0,
             ratings_count: 0,
+            reputation_breakdown: ReputationBreakdown::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct ReputationBreakdown {
+    seed_source: Option<String>,
+    seed_score: Option<f64>,
+    seed_weight: f64,
+    feedback_weight: f64,
+    total_weight: f64,
+    confidence: f64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ReputationSeed {
+    source: String,
+    score: f64,
+    weight: f64,
+    details: Value,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GithubAccountSnapshot {
+    login: String,
+    account_created_at: Option<String>,
+    public_repos: u64,
+    public_gists: u64,
+    followers: u64,
+    following: u64,
+    total_stars_sampled: u64,
+    source_repos_sampled: u64,
+    fork_repos_sampled: u64,
+    recent_events_sampled: u64,
+    recent_activity_year: Option<i64>,
+    fetched_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GithubReputationSeed {
+    score: f64,
+    weight: f64,
+    snapshot: GithubAccountSnapshot,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -179,6 +223,7 @@ struct PublicUserProfile {
     tags: Vec<String>,
     reputation: f64,
     ratings_count: u64,
+    reputation_breakdown: ReputationBreakdown,
     friend_code: String,
     intro_code: String,
     is_public: bool,
@@ -357,6 +402,10 @@ impl AgentDirectoryVisibility {
 struct AdminSettings {
     allow_registration: bool,
     oauth_channels: Vec<OAuthChannel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    github_api_token: Option<String>,
+    #[serde(default)]
+    github_api_token_configured: bool,
     #[serde(default = "default_agent_secret_prefix", alias = "agent_secret")]
     agent_secret_prefix: Option<String>,
     #[serde(default)]
@@ -375,6 +424,10 @@ struct RawAdminSettings {
     allow_registration: bool,
     #[serde(default = "default_oauth_channels")]
     oauth_channels: Vec<OAuthChannel>,
+    #[serde(default)]
+    github_api_token: Option<String>,
+    #[serde(default)]
+    github_api_token_configured: bool,
     #[serde(default = "default_agent_secret_prefix", alias = "agent_secret")]
     agent_secret_prefix: Option<String>,
     #[serde(default)]
@@ -409,6 +462,8 @@ impl<'de> Deserialize<'de> for AdminSettings {
         Ok(Self {
             allow_registration: raw.allow_registration,
             oauth_channels: raw.oauth_channels,
+            github_api_token: raw.github_api_token,
+            github_api_token_configured: raw.github_api_token_configured,
             agent_secret_prefix: raw.agent_secret_prefix,
             allow_agent_directory: agent_directory_visibility.allows_non_self(),
             agent_directory_visibility,
@@ -442,6 +497,8 @@ impl Default for AdminSettings {
         Self {
             allow_registration: true,
             oauth_channels: default_oauth_channels(),
+            github_api_token: None,
+            github_api_token_configured: false,
             agent_secret_prefix: default_agent_secret_prefix(),
             allow_agent_directory: false,
             agent_directory_visibility: default_agent_directory_visibility(),
@@ -824,12 +881,32 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
             rated_email TEXT NOT NULL,
             rater_email TEXT NOT NULL,
             score REAL NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
             note TEXT,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             PRIMARY KEY (rated_email, rater_email)
         );
         CREATE INDEX IF NOT EXISTS idx_human_ratings_rated ON human_ratings(rated_email);
+
+        CREATE TABLE IF NOT EXISTS reputation_seeds (
+            email TEXT PRIMARY KEY,
+            source TEXT NOT NULL,
+            score REAL NOT NULL,
+            weight REAL NOT NULL,
+            details_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_reputation_seeds_source ON reputation_seeds(source, updated_at);
+
+        CREATE TABLE IF NOT EXISTS github_account_cache (
+            login TEXT PRIMARY KEY,
+            account_json TEXT NOT NULL,
+            fetched_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_github_account_cache_expires ON github_account_cache(expires_at);
 
         CREATE TABLE IF NOT EXISTS human_reports (
             id TEXT PRIMARY KEY,
@@ -843,7 +920,35 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
         "#,
     )
     .context("initialize sqlite schema")?;
+    migrate_reputation_schema(&conn).context("migrate sqlite schema")?;
     Ok(conn)
+}
+
+fn migrate_reputation_schema(conn: &Connection) -> anyhow::Result<()> {
+    if !sqlite_table_has_column(conn, "human_ratings", "weight")? {
+        conn.execute(
+            "ALTER TABLE human_ratings ADD COLUMN weight REAL NOT NULL DEFAULT 1.0",
+            [],
+        )
+        .context("add human_ratings.weight column")?;
+    }
+    Ok(())
+}
+
+fn sqlite_table_has_column(conn: &Connection, table: &str, column: &str) -> anyhow::Result<bool> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .with_context(|| format!("inspect sqlite table {table}"))?;
+    let mut rows = stmt.query([]).with_context(|| format!("query sqlite table {table}"))?;
+    while let Some(row) = rows.next().context("iterate sqlite table columns")? {
+        let name: String = row
+            .get(1)
+            .with_context(|| format!("read sqlite table column name for {table}"))?;
+        if name == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn load_buffered_requests(state: &AppState) -> anyhow::Result<()> {

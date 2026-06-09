@@ -506,16 +506,54 @@ fn db_store_human_rating(
         .db
         .lock()
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let rater_reputation = reputation_summary_from_db(&db, &rater_email)?;
+    let weight = reputation_feedback_weight(&rater_reputation);
     db.execute(
         "INSERT INTO human_ratings \
-         (rated_email, rater_email, score, note, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?5) \
+         (rated_email, rater_email, score, weight, note, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
          ON CONFLICT(rated_email, rater_email) DO UPDATE SET \
-           score=excluded.score, note=excluded.note, updated_at=excluded.updated_at",
-        params![rated_email, rater_email, score, note, now],
+           score=excluded.score, weight=excluded.weight, note=excluded.note, updated_at=excluded.updated_at",
+        params![rated_email, rater_email, score, weight, note, now],
     )
     .map_err(|err| ApiError::internal(format!("persist human rating: {err}")))?;
     reputation_summary_from_db(&db, &rated_email)
+}
+
+fn reputation_feedback_weight(rater_reputation: &ReputationSummary) -> f64 {
+    (rater_reputation.reputation.clamp(0.0, 10.0) / 5.0).clamp(0.5, 2.0)
+}
+
+fn db_upsert_reputation_seed(
+    state: &AppState,
+    email: &str,
+    seed: ReputationSeed,
+) -> Result<ReputationSummary, ApiError> {
+    let email = normalize_email(email);
+    let source = seed.source.trim();
+    if source.is_empty() {
+        return Err(ApiError::bad_request("reputation seed source is required"));
+    }
+    let score = seed.score.clamp(0.0, 10.0);
+    let weight = seed.weight.clamp(0.0, 20.0);
+    let details_json = serde_json::to_string(&seed.details)
+        .map_err(|err| ApiError::internal(format!("serialize reputation seed: {err}")))?;
+    let now = now_unix();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO reputation_seeds \
+         (email, source, score, weight, details_json, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
+         ON CONFLICT(email) DO UPDATE SET \
+           source=excluded.source, score=excluded.score, weight=excluded.weight, \
+           details_json=excluded.details_json, updated_at=excluded.updated_at",
+        params![email, source, score, weight, details_json, now],
+    )
+    .map_err(|err| ApiError::internal(format!("persist reputation seed: {err}")))?;
+    reputation_summary_from_db(&db, &email)
 }
 
 fn db_reputation_summary_for(
@@ -534,17 +572,27 @@ fn reputation_summary_from_db(
     db: &Connection,
     email: &str,
 ) -> Result<ReputationSummary, ApiError> {
-    let row = db
+    let email = normalize_email(email);
+    let rating_row = db
         .query_row(
-            "SELECT AVG(score), COUNT(*) FROM human_ratings WHERE rated_email = ?1",
-            params![normalize_email(email)],
-            |row| Ok((row.get::<_, Option<f64>>(0)?, row.get::<_, u64>(1)?)),
+            "SELECT SUM(score * weight), SUM(weight), COUNT(*) FROM human_ratings WHERE rated_email = ?1",
+            params![email],
+            |row| {
+                Ok((
+                    row.get::<_, Option<f64>>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
         )
         .map_err(|err| ApiError::internal(format!("read reputation: {err}")))?;
-    Ok(ReputationSummary {
-        reputation: row.0.unwrap_or(5.0),
-        ratings_count: row.1,
-    })
+    let seed = reputation_seed_from_db(db, &email)?;
+    Ok(reputation_summary_from_parts(
+        seed.as_ref(),
+        rating_row.0.unwrap_or(0.0),
+        rating_row.1.unwrap_or(0.0),
+        rating_row.2,
+    ))
 }
 
 fn db_reputation_map(state: &AppState) -> Result<HashMap<String, ReputationSummary>, ApiError> {
@@ -552,9 +600,11 @@ fn db_reputation_map(state: &AppState) -> Result<HashMap<String, ReputationSumma
         .db
         .lock()
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut parts: HashMap<String, (Option<ReputationSeed>, f64, f64, u64)> = HashMap::new();
+
     let mut stmt = db
         .prepare(
-            "SELECT rated_email, AVG(score), COUNT(*) \
+            "SELECT rated_email, SUM(score * weight), SUM(weight), COUNT(*) \
              FROM human_ratings \
              GROUP BY rated_email",
         )
@@ -564,23 +614,193 @@ fn db_reputation_map(state: &AppState) -> Result<HashMap<String, ReputationSumma
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<f64>>(1)?,
-                row.get::<_, u64>(2)?,
+                row.get::<_, Option<f64>>(2)?,
+                row.get::<_, u64>(3)?,
             ))
         })
         .map_err(|err| ApiError::internal(format!("query reputation map: {err}")))?;
-    let mut map = HashMap::new();
     for row in rows {
-        let (email, reputation, ratings_count) =
+        let (email, rating_weighted_sum, rating_weight_total, ratings_count) =
             row.map_err(|err| ApiError::internal(format!("read reputation map: {err}")))?;
+        let entry = parts
+            .entry(normalize_email(&email))
+            .or_insert_with(|| (None, 0.0, 0.0, 0));
+        entry.1 = rating_weighted_sum.unwrap_or(0.0);
+        entry.2 = rating_weight_total.unwrap_or(0.0);
+        entry.3 = ratings_count;
+    }
+
+    let mut stmt = db
+        .prepare("SELECT email, source, score, weight, details_json FROM reputation_seeds")
+        .map_err(|err| ApiError::internal(format!("prepare reputation seed map: {err}")))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, f64>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })
+        .map_err(|err| ApiError::internal(format!("query reputation seed map: {err}")))?;
+    for row in rows {
+        let (email, source, score, weight, details_json) =
+            row.map_err(|err| ApiError::internal(format!("read reputation seed map: {err}")))?;
+        let details = serde_json::from_str(&details_json)
+            .map_err(|err| ApiError::internal(format!("parse reputation seed details: {err}")))?;
+        let entry = parts
+            .entry(normalize_email(&email))
+            .or_insert_with(|| (None, 0.0, 0.0, 0));
+        entry.0 = Some(ReputationSeed {
+            source,
+            score,
+            weight,
+            details,
+        });
+    }
+
+    let mut map = HashMap::new();
+    for (email, (seed, rating_weighted_sum, rating_weight_total, ratings_count)) in parts {
         map.insert(
-            normalize_email(&email),
-            ReputationSummary {
-                reputation: reputation.unwrap_or(5.0),
+            email,
+            reputation_summary_from_parts(
+                seed.as_ref(),
+                rating_weighted_sum,
+                rating_weight_total,
                 ratings_count,
-            },
+            ),
         );
     }
     Ok(map)
+}
+
+fn reputation_seed_from_db(
+    db: &Connection,
+    email: &str,
+) -> Result<Option<ReputationSeed>, ApiError> {
+    let row = db
+        .query_row(
+            "SELECT source, score, weight, details_json FROM reputation_seeds WHERE email = ?1",
+            params![normalize_email(email)],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, f64>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|err| ApiError::internal(format!("read reputation seed: {err}")))?;
+    let Some((source, score, weight, details_json)) = row else {
+        return Ok(None);
+    };
+    let details = serde_json::from_str(&details_json)
+        .map_err(|err| ApiError::internal(format!("parse reputation seed details: {err}")))?;
+    Ok(Some(ReputationSeed {
+        source,
+        score,
+        weight,
+        details,
+    }))
+}
+
+fn reputation_summary_from_parts(
+    seed: Option<&ReputationSeed>,
+    rating_weighted_sum: f64,
+    rating_weight_total: f64,
+    ratings_count: u64,
+) -> ReputationSummary {
+    let seed = seed.filter(|seed| seed.weight > 0.0);
+    let seed_weight = seed.map(|seed| seed.weight).unwrap_or(0.0);
+    let total_weight = seed_weight + rating_weight_total;
+    let reputation = if let Some(seed) = seed {
+        let denominator = total_weight;
+        if denominator > 0.0 {
+            ((seed.score * seed.weight) + rating_weighted_sum) / denominator
+        } else {
+            5.0
+        }
+    } else if rating_weight_total > 0.0 {
+        rating_weighted_sum / rating_weight_total
+    } else {
+        5.0
+    };
+    ReputationSummary {
+        reputation: reputation.clamp(0.0, 10.0),
+        ratings_count,
+        reputation_breakdown: ReputationBreakdown {
+            seed_source: seed.map(|seed| seed.source.clone()),
+            seed_score: seed.map(|seed| seed.score.clamp(0.0, 10.0)),
+            seed_weight,
+            feedback_weight: rating_weight_total,
+            total_weight,
+            confidence: reputation_confidence(total_weight),
+        },
+    }
+}
+
+fn reputation_confidence(total_weight: f64) -> f64 {
+    if total_weight <= 0.0 {
+        return 0.0;
+    }
+    (total_weight / 8.0).clamp(0.0, 1.0)
+}
+
+fn db_get_fresh_github_account_snapshot(
+    state: &AppState,
+    login: &str,
+    now: u64,
+) -> Result<Option<GithubAccountSnapshot>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let row = db
+        .query_row(
+            "SELECT account_json FROM github_account_cache WHERE login = ?1 AND expires_at > ?2",
+            params![normalize_github_login_key(login), now],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| ApiError::internal(format!("read GitHub account cache: {err}")))?;
+    let Some(raw) = row else {
+        return Ok(None);
+    };
+    let snapshot = serde_json::from_str(&raw)
+        .map_err(|err| ApiError::internal(format!("parse GitHub account cache: {err}")))?;
+    Ok(Some(snapshot))
+}
+
+fn db_store_github_account_snapshot(
+    state: &AppState,
+    snapshot: &GithubAccountSnapshot,
+    ttl_seconds: u64,
+) -> Result<(), ApiError> {
+    let account_json = serde_json::to_string(snapshot)
+        .map_err(|err| ApiError::internal(format!("serialize GitHub account cache: {err}")))?;
+    let fetched_at = snapshot.fetched_at;
+    let expires_at = fetched_at.saturating_add(ttl_seconds);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO github_account_cache (login, account_json, fetched_at, expires_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(login) DO UPDATE SET \
+           account_json=excluded.account_json, fetched_at=excluded.fetched_at, expires_at=excluded.expires_at",
+        params![
+            normalize_github_login_key(&snapshot.login),
+            account_json,
+            fetched_at,
+            expires_at
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist GitHub account cache: {err}")))?;
+    Ok(())
 }
 
 fn db_create_human_report(

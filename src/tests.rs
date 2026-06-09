@@ -16,6 +16,7 @@ mod tests {
             session_secret: "test-session-secret".to_string(),
             github_client_id: None,
             github_client_secret: None,
+            github_api_token: None,
             trash_retention_seconds: 60,
             cleanup_interval_seconds: 60,
             self_update_command: String::new(),
@@ -54,6 +55,45 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_schemas_expose_blocking_human_request_inputs() {
+        for schema in [approve_schema(), judge_schema(), feedback_schema()] {
+            assert_eq!(schema["required"], json!(["title", "prompt"]));
+            assert_eq!(
+                schema["properties"]["timeout_seconds"]["default"],
+                json!(60)
+            );
+            assert!(schema["properties"].get("background").is_none());
+        }
+    }
+
+    #[test]
+    fn shortcut_tools_force_their_fixed_request_kinds_and_blocking_mode() {
+        let payload = McpRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: json!({
+                "arguments": {
+                    "kind": "text",
+                    "title": "Check rollout",
+                    "prompt": "Can this deploy continue?",
+                    "background": true
+                }
+            }),
+        };
+
+        let approval =
+            parse_blocking_shortcut_arguments(&payload, "approve", TaskKind::Judgment).unwrap();
+        assert_eq!(approval.kind, TaskKind::Judgment);
+        assert!(!approval.background);
+
+        let feedback = parse_blocking_shortcut_arguments(&payload, "feedback", TaskKind::Text)
+            .unwrap();
+        assert_eq!(feedback.kind, TaskKind::Text);
+        assert!(!feedback.background);
+    }
+
+    #[test]
     fn report_and_rating_schemas_expose_public_interfaces() {
         let rating_schema = rate_humen_schema();
         assert_eq!(rating_schema["required"], json!(["rated_email", "score"]));
@@ -67,7 +107,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mcp_tools_list_exposes_report_and_rating_tools() {
+    async fn mcp_tools_list_exposes_reputation_and_shortcut_tools() {
         let state = test_state();
         {
             let mut settings = state.admin_settings.lock().unwrap();
@@ -113,6 +153,9 @@ mod tests {
 
         assert!(tool_names.contains(&"rate_humen"));
         assert!(tool_names.contains(&"report_humen"));
+        assert!(tool_names.contains(&"approve"));
+        assert!(tool_names.contains(&"judge"));
+        assert!(tool_names.contains(&"feedback"));
     }
 
     #[test]
@@ -730,6 +773,276 @@ mod tests {
         .unwrap();
         assert_eq!(updated.ratings_count, 1);
         assert_eq!(updated.reputation, 9.0);
+    }
+
+    #[test]
+    fn github_reputation_seed_sets_initial_score_and_blends_with_ratings() {
+        let state = test_state();
+        let seed = ReputationSeed {
+            source: "github".to_string(),
+            score: 8.0,
+            weight: 2.0,
+            details: json!({ "login": "alice" }),
+        };
+
+        let initial = db_upsert_reputation_seed(&state, "alice@example.com", seed).unwrap();
+        assert_eq!(initial.ratings_count, 0);
+        assert_eq!(initial.reputation, 8.0);
+        assert_eq!(
+            initial.reputation_breakdown.seed_source.as_deref(),
+            Some("github")
+        );
+        assert_eq!(initial.reputation_breakdown.seed_weight, 2.0);
+        assert_eq!(initial.reputation_breakdown.feedback_weight, 0.0);
+
+        let blended = db_store_human_rating(
+            &state,
+            "alice@example.com",
+            "bob@example.com",
+            4.0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(blended.ratings_count, 1);
+        assert!((blended.reputation - 6.666_666_666).abs() < 0.000_001);
+        assert_eq!(blended.reputation_breakdown.seed_weight, 2.0);
+        assert_eq!(blended.reputation_breakdown.feedback_weight, 1.0);
+        assert_eq!(blended.reputation_breakdown.total_weight, 3.0);
+        assert!(blended.reputation_breakdown.confidence > 0.0);
+    }
+
+    #[test]
+    fn ratings_are_weighted_by_rater_reputation() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("trusted@example.com", 1, "Trusted"));
+            users.insert(new_user_record("newbie@example.com", 1, "Newbie"));
+            users.insert(new_user_record("bob@example.com", 1, "Bob"));
+        }
+
+        db_upsert_reputation_seed(
+            &state,
+            "trusted@example.com",
+            ReputationSeed {
+                source: "github".to_string(),
+                score: 10.0,
+                weight: 2.0,
+                details: json!({ "login": "trusted" }),
+            },
+        )
+        .unwrap();
+        db_upsert_reputation_seed(
+            &state,
+            "newbie@example.com",
+            ReputationSeed {
+                source: "github".to_string(),
+                score: 1.0,
+                weight: 2.0,
+                details: json!({ "login": "newbie" }),
+            },
+        )
+        .unwrap();
+
+        rate_human_from_actor(
+            &state,
+            "trusted@example.com",
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 10.0,
+                note: None,
+            },
+        )
+        .unwrap();
+        rate_human_from_actor(
+            &state,
+            "newbie@example.com",
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 0.0,
+                note: None,
+            },
+        )
+        .unwrap();
+
+        let summary = db_reputation_summary_for(&state, "bob@example.com").unwrap();
+        assert_eq!(summary.ratings_count, 2);
+        assert!((summary.reputation - 8.0).abs() < 0.000_001);
+    }
+
+    #[test]
+    fn visible_profiles_sort_by_reputation_after_presence() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("alice@example.com", 1, "Alice"));
+            let mut bob = new_user_record("bob@example.com", 1, "Bob");
+            bob.is_public = true;
+            let mut carol = new_user_record("carol@example.com", 1, "Carol");
+            carol.is_public = true;
+            users.insert(bob);
+            users.insert(carol);
+        }
+
+        db_upsert_reputation_seed(
+            &state,
+            "bob@example.com",
+            ReputationSeed {
+                source: "github".to_string(),
+                score: 9.0,
+                weight: 2.0,
+                details: json!({ "login": "bob" }),
+            },
+        )
+        .unwrap();
+        db_upsert_reputation_seed(
+            &state,
+            "carol@example.com",
+            ReputationSeed {
+                source: "github".to_string(),
+                score: 2.0,
+                weight: 2.0,
+                details: json!({ "login": "carol" }),
+            },
+        )
+        .unwrap();
+
+        let emails: Vec<_> = visible_user_profiles_for_session(
+            &state,
+            "alice@example.com",
+            None,
+            None,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|profile| normalize_email(&profile.email))
+        .collect();
+
+        assert_eq!(
+            emails,
+            vec![
+                "bob@example.com".to_string(),
+                "alice@example.com".to_string(),
+                "carol@example.com".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn leaderboard_includes_visible_seeded_profiles_without_handled_requests() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            let mut alice = new_user_record("alice@example.com", 1, "Alice");
+            alice.is_public = true;
+            users.insert(alice);
+        }
+        db_upsert_reputation_seed(
+            &state,
+            "alice@example.com",
+            ReputationSeed {
+                source: "github".to_string(),
+                score: 8.5,
+                weight: 2.0,
+                details: json!({ "login": "alice" }),
+            },
+        )
+        .unwrap();
+
+        let profiles = user_profiles(&state, None, None).unwrap();
+        let entries = leaderboard_entries_for_profiles(&state, profiles).unwrap();
+        let alice = entries
+            .iter()
+            .find(|entry| normalize_email(&entry.email) == "alice@example.com")
+            .unwrap();
+
+        assert_eq!(alice.requests_handled, 0);
+        assert_eq!(alice.sent_tokens, 0);
+        assert_eq!(alice.reputation, 8.5);
+        assert_eq!(
+            alice.reputation_breakdown.seed_source.as_deref(),
+            Some("github")
+        );
+    }
+
+    #[test]
+    fn github_account_cache_reuses_fresh_snapshot_and_expires_old_entries() {
+        let state = test_state();
+        let snapshot = GithubAccountSnapshot {
+            login: "Alice".to_string(),
+            account_created_at: Some("2016-01-01T00:00:00Z".to_string()),
+            public_repos: 12,
+            public_gists: 1,
+            followers: 20,
+            following: 5,
+            total_stars_sampled: 30,
+            source_repos_sampled: 10,
+            fork_repos_sampled: 2,
+            recent_events_sampled: 3,
+            recent_activity_year: Some(2026),
+            fetched_at: 100,
+        };
+
+        db_store_github_account_snapshot(&state, &snapshot, 50).unwrap();
+        assert_eq!(
+            db_get_fresh_github_account_snapshot(&state, "alice", 149)
+                .unwrap()
+                .unwrap()
+                .public_repos,
+            12
+        );
+        assert!(db_get_fresh_github_account_snapshot(&state, "alice", 151)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn admin_github_api_token_is_write_only_and_preserved_when_missing() {
+        let state = test_state();
+        {
+            let mut settings = state.admin_settings.lock().unwrap();
+            settings.github_api_token = Some("old-token".to_string());
+        }
+
+        let stored = state.admin_settings.lock().unwrap().clone();
+        let response = admin_settings_response(&state, stored);
+        assert!(response.github_api_token_configured);
+        assert!(response.github_api_token.is_none());
+
+        let mut payload = AdminSettings::default();
+        payload.github_api_token = None;
+        merge_admin_secret_settings(&state, &mut payload).unwrap();
+        let sanitized = sanitize_admin_settings(payload);
+        assert_eq!(sanitized.github_api_token.as_deref(), Some("old-token"));
+
+        let mut clear_payload = AdminSettings::default();
+        clear_payload.github_api_token = Some(" ".to_string());
+        merge_admin_secret_settings(&state, &mut clear_payload).unwrap();
+        let sanitized = sanitize_admin_settings(clear_payload);
+        assert!(sanitized.github_api_token.is_none());
+    }
+
+    #[test]
+    fn github_reputation_algorithm_rewards_established_public_accounts() {
+        let user = json!({
+            "login": "alice",
+            "created_at": "2015-01-01T00:00:00Z",
+            "public_repos": 40,
+            "public_gists": 2,
+            "followers": 150,
+            "following": 20
+        });
+        let repos = json!([
+            { "stargazers_count": 50, "fork": false, "pushed_at": "2026-03-01T00:00:00Z" },
+            { "stargazers_count": 20, "fork": false, "pushed_at": "2025-09-01T00:00:00Z" },
+            { "stargazers_count": 0, "fork": true, "pushed_at": "2024-01-01T00:00:00Z" }
+        ]);
+        let events = json!([{ "type": "PushEvent" }]);
+        let snapshot = github_account_snapshot_from_api("alice", &user, &repos, &events, 1_783_468_800);
+        let seed = github_reputation_seed_from_snapshot(snapshot);
+
+        assert!(seed.score > 7.0);
+        assert_eq!(seed.weight, 2.0);
     }
 
     fn tag_count(tags: &[Value], tag: &str) -> Option<u64> {

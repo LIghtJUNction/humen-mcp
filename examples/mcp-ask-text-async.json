@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": {
+    "name": "ask_humen_text_async",
+    "arguments": {
+      "title": "Check deployment note",
+      "prompt": "Read the deployment note and summarize the action needed.",
+      "steps": [
+        "Open the provided deployment note.",
+        "Identify the one action the operator should take.",
+        "Reply with a concise summary."
+      ],
+      "timeout_seconds": 300
+    }
+  }
+}

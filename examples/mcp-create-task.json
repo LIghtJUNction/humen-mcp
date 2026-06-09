@@ -1,0 +1,19 @@
+{
+  "jsonrpc": "2.0",
+  "id": 8,
+  "method": "tools/call",
+  "params": {
+    "name": "create_humen_task",
+    "arguments": {
+      "title": "Review production login",
+      "description": "Confirm that the admin can log in after the latest deployment.",
+      "steps": [
+        "Open /mcp/ with the production domain.",
+        "Log in as the configured admin.",
+        "Confirm the sidebar and request list render."
+      ],
+      "tags": ["#deploy", "#smoke"],
+      "due_at": 4102444800
+    }
+  }
+}

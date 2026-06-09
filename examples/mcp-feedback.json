@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": 17,
+  "method": "tools/call",
+  "params": {
+    "name": "feedback",
+    "arguments": {
+      "title": "Review wording",
+      "prompt": "Give short feedback on whether this onboarding copy sounds clear and trustworthy.",
+      "steps": [
+        "Read the proposed copy.",
+        "Mention the single most important wording issue, if any."
+      ],
+      "timeout_seconds": 300
+    }
+  }
+}

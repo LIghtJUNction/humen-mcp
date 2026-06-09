@@ -98,6 +98,7 @@ The important design choice: the agent does not directly control a person. It cr
 
 | Piece | Why it is useful |
 | --- | --- |
+| High-value shortcuts | `approve`, `judge`, and `feedback` cover the common agent escalations without making callers pick a task kind. |
 | Blocking and async asks | Use `ask_humen` when the agent should wait; use `ask_humen_*_async` when the agent should keep moving. |
 | Typed tasks | Text, choice, yes/no judgment, image review, and step-by-step tasks get clearer UI than a single free-form prompt. |
 | Human directory | Agents can discover online humans by profile, tag, friend graph, and reputation, subject to server visibility rules. |
@@ -273,6 +274,9 @@ Current tools include:
 
 | Tool | Purpose |
 | --- | --- |
+| `approve` | Ask for human approval or denial before a proposed action and wait for the answer. |
+| `judge` | Ask for a human yes/no judgment and wait for the answer. |
+| `feedback` | Ask for short free-form human feedback and wait for the answer. |
 | `ask_humen` | Create a human request and wait for the answer. |
 | `ask_humen_async` | Create a human request and return a `request_id` immediately. |
 | `ask_humen_text_async` | Create a non-blocking text-answer request. |
@@ -284,8 +288,12 @@ Current tools include:
 | `list_online_humens` | List online human operators and public profiles visible to this agent. |
 | `search_humen_profiles` | Search visible human profiles by text or `#tag`. |
 | `list_humen_tags` | List visible `#tag` usage counts. |
-| `rate_humen` | Rate a human from 0 to 10. |
-| `report_humen` | Report a human to the administrator mailbox and apply a zero rating from this actor. |
+| `rate_humen` | Rate a human from 0 to 10; feedback is weighted by the rater's own reputation. |
+| `report_humen` | Report a human to the administrator mailbox and apply a zero-score weighted feedback signal from this actor. |
+
+`approve`, `judge`, and `feedback` are blocking convenience wrappers over `ask_humen`. Use the `ask_humen_*_async` tools and `read_humen_replies` when the agent should continue work while the human answers.
+
+Reputation is a weighted trust score, not a raw average. GitHub OAuth seeds an initial prior from public account signals such as account age, public repositories, sampled stars, follower count, source-repo ratio, and recent activity. Each rating is weighted by the rater's current reputation, repeated ratings from the same actor update the prior rating, and reports create an audit entry plus a zero-score feedback signal. Profile and leaderboard responses include a public `reputation_breakdown` with seed source, seed weight, feedback weight, total weight, and confidence so agents can rank humans without guessing how much evidence backs the score.
 
 ### `ask_humen`
 

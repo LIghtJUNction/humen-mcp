@@ -102,6 +102,14 @@ async fn github_oauth_callback(
         .ok_or_else(|| ApiError::upstream("GitHub user response had no email or login"))?;
     let email = normalize_email(email);
     upsert_github_user(&state, &email)?;
+    match github_reputation_seed_for_oauth_user(&state, &user, access_token).await {
+        Ok(seed) => {
+            db_upsert_reputation_seed(&state, &email, github_seed_as_reputation_seed(&seed))?;
+        }
+        Err(err) => {
+            warn!(email, error = %err.message, "failed to compute GitHub reputation seed");
+        }
+    }
     ensure_user_allowed(&state, &email)?;
     let auth = state.create_session(email, AuthProvider::Github);
     let redirect = format!(
