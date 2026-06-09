@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title>humen-mcp</title>
+  <rect width="64" height="64" rx="14" fill="#101713" />
+  <path d="M12 18.5C12 13.8 15.8 10 20.5 10h23C48.2 10 52 13.8 52 18.5v18C52 41.2 48.2 45 43.5 45H34l-12 9v-9h-1.5C15.8 45 12 41.2 12 36.5v-18Z" fill="#63c58e" />
+  <path
+    d="M22 23h5.8v6.2h8.4V23H42v18h-5.8v-6.9h-8.4V41H22V23Z"
+    fill="#101713"
+  />
+  <path d="M18 18h9" stroke="#d9f5e4" stroke-width="3" stroke-linecap="round" />
+  <circle cx="48" cy="18" r="5.5" fill="#f1b761" />
+  <circle cx="48" cy="18" r="2.2" fill="#101713" />
+</svg>

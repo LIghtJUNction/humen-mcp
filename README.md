@@ -1,7 +1,7 @@
 # humen-mcp
 
 <div align="center">
-  <img src="humen-mcp-webui/src/assets/logo.svg" width="96" height="96" alt="humen-mcp logo" />
+  <img src="docs/assets/humen-mcp-logo.svg" width="96" height="96" alt="humen-mcp logo" />
 
   <h3>Ask a real human from an MCP tool call.</h3>
 
