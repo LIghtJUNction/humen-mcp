@@ -5,7 +5,7 @@
 1. Agent calls MCP `tools/call` for `ask_humen`.
 2. Backend validates the MCP payload and creates a pending request envelope with `created_at`, `timeout_seconds`, and `expires_at`.
 3. Human logs into the web UI and receives the request over WebSocket plus REST polling fallback, including a live countdown from `expires_at`.
-4. Human answers a simple choice, text, image review, or step-following task.
+4. Human answers a simple choice, text, image review, or step-following task. Image review requests can reference a remote `image_url` or embed `image_base64` data that the web UI renders as a data URL.
 5. Backend resolves the waiting MCP call with the human answer.
 
 If the envelope expires first, the backend removes it from pending requests, stores it in the in-memory trash bin, sends `request_expired`, and returns JSON-RPC error code `-32001` with request details and a retry suggestion. Trash is retained for `HUMEN_TRASH_RETENTION_SECONDS` and cleaned on `HUMEN_CLEANUP_INTERVAL_SECONDS`.

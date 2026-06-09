@@ -1,6 +1,6 @@
 ---
 name: humen-mcp
-description: Use when working in the humen-mcp repository: MCP endpoint behavior, ask_humen tool semantics, Rust backend, Bun web UI submodule, AUR packaging, or Arch deployment.
+description: "Use when working in the humen-mcp repository: MCP endpoint behavior, ask_humen tool semantics, Rust backend, Bun web UI submodule, AUR packaging, or Arch deployment."
 ---
 
 # humen-mcp

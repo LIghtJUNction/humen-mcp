@@ -25,6 +25,7 @@ use dashmap::DashMap;
 use futures_util::StreamExt;
 use rand::{distr::Alphanumeric, Rng};
 use reqwest::Client;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -87,6 +88,9 @@ struct Config {
     )]
     users_file: PathBuf,
 
+    #[arg(long, env = "HUMEN_DB_FILE", default_value = "./humen-mcp.sqlite3")]
+    db_file: PathBuf,
+
     #[arg(long, env = "HUMEN_ADMIN_EMAIL", default_value = "<admin-email>")]
     admin_email: String,
 
@@ -126,6 +130,7 @@ struct AppState {
     sessions: Arc<DashMap<String, Session>>,
     users: Arc<Mutex<UserStore>>,
     admin_settings: Arc<Mutex<AdminSettings>>,
+    db: Arc<Mutex<Connection>>,
     online_humans: Arc<AtomicUsize>,
     events: broadcast::Sender<ServerEvent>,
     http: Client,
@@ -135,18 +140,23 @@ impl AppState {
     fn new(config: Config) -> anyhow::Result<Self> {
         let (events, _) = broadcast::channel(128);
         let users = UserStore::load(&config.users_file)?;
-        Ok(Self {
+        let admin_settings = users.admin_settings.clone();
+        let db = open_db(&config.db_file)?;
+        let state = Self {
             config: Arc::new(config),
             requests: Arc::new(DashMap::new()),
             waiters: Arc::new(DashMap::new()),
             trash: Arc::new(DashMap::new()),
             sessions: Arc::new(DashMap::new()),
             users: Arc::new(Mutex::new(users)),
-            admin_settings: Arc::new(Mutex::new(AdminSettings::default())),
+            admin_settings: Arc::new(Mutex::new(admin_settings)),
+            db: Arc::new(Mutex::new(db)),
             online_humans: Arc::new(AtomicUsize::new(0)),
             events,
             http: Client::new(),
-        })
+        };
+        load_buffered_requests(&state)?;
+        Ok(state)
     }
 
     fn create_session(&self, email: impl Into<String>, provider: AuthProvider) -> AuthResponse {
@@ -207,6 +217,8 @@ struct HumanRequest {
     prompt: String,
     choices: Vec<String>,
     image_url: Option<String>,
+    image_base64: Option<String>,
+    image_mime_type: Option<String>,
     steps: Vec<String>,
     created_at: u64,
     timeout_seconds: u64,
@@ -238,6 +250,16 @@ struct CreateHumanRequest {
     #[serde(default)]
     choices: Vec<String>,
     image_url: Option<String>,
+    #[serde(
+        alias = "image_base_64",
+        alias = "base64_image",
+        alias = "base_64_image",
+        alias = "base64",
+        alias = "base_64"
+    )]
+    image_base64: Option<String>,
+    #[serde(alias = "mime_type")]
+    image_mime_type: Option<String>,
     #[serde(default)]
     steps: Vec<String>,
     #[serde(default = "default_timeout")]
@@ -257,6 +279,15 @@ struct ExpiredRequest {
     request: HumanRequest,
     expired_at: u64,
     reason: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct LateHumanReply {
+    request: HumanRequest,
+    answer: HumanAnswer,
+    expired_at: Option<u64>,
+    answered_late: bool,
+    read_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -341,6 +372,10 @@ struct AuthConfigResponse {
 struct AdminSettings {
     allow_registration: bool,
     oauth_channels: Vec<OAuthChannel>,
+    #[serde(default)]
+    agent_secret: Option<String>,
+    #[serde(default)]
+    webhooks: Vec<WebhookConfig>,
 }
 
 impl Default for AdminSettings {
@@ -351,7 +386,10 @@ impl Default for AdminSettings {
                 provider: "github".to_string(),
                 enabled: false,
                 client_id: String::new(),
+                client_secret: None,
             }],
+            agent_secret: None,
+            webhooks: Vec::new(),
         }
     }
 }
@@ -361,6 +399,55 @@ struct OAuthChannel {
     provider: String,
     enabled: bool,
     client_id: String,
+    #[serde(default)]
+    client_secret: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct WebhookConfig {
+    id: Uuid,
+    name: String,
+    url: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    secret: Option<String>,
+    #[serde(default = "default_webhook_kind")]
+    kind: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct IncomingMessage {
+    source: String,
+    sender: String,
+    content: String,
+    #[serde(default)]
+    raw: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebhooksUpdate {
+    webhooks: Vec<WebhookConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IncomingSecretQuery {
+    secret: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_webhook_kind() -> String {
+    "generic".to_string()
+}
+
+#[derive(Debug, Deserialize)]
+struct ProfileUpdate {
+    profile: String,
+    #[serde(default)]
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -409,6 +496,8 @@ struct ActivePeriod {
 struct UserStore {
     #[serde(default)]
     users: HashMap<String, UserRecord>,
+    #[serde(default)]
+    admin_settings: AdminSettings,
 }
 
 impl UserStore {
@@ -431,6 +520,73 @@ impl UserStore {
     fn insert(&mut self, record: UserRecord) {
         self.users.insert(normalize_email(&record.email), record);
     }
+}
+
+fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).context("create sqlite directory")?;
+    }
+    let conn =
+        Connection::open(path).with_context(|| format!("open sqlite db {}", path.display()))?;
+    conn.pragma_update(None, "journal_mode", "WAL")
+        .context("enable sqlite WAL")?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS human_requests (
+            id TEXT PRIMARY KEY,
+            status TEXT NOT NULL,
+            request_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            expired_at INTEGER,
+            expire_reason TEXT,
+            answer_json TEXT,
+            answered_at INTEGER,
+            answered_late INTEGER NOT NULL DEFAULT 0,
+            read_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_human_requests_status ON human_requests(status);
+        CREATE INDEX IF NOT EXISTS idx_human_requests_answered_late ON human_requests(answered_late, answered_at);
+        "#,
+    )
+    .context("initialize sqlite schema")?;
+    Ok(conn)
+}
+
+fn load_buffered_requests(state: &AppState) -> anyhow::Result<()> {
+    let now = now_unix();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| anyhow::anyhow!("sqlite lock poisoned"))?;
+    let mut stmt = db.prepare(
+        "SELECT request_json, status, expired_at, expire_reason FROM human_requests \
+         WHERE status IN ('pending', 'expired')",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let request_json: String = row.get(0)?;
+        let status: String = row.get(1)?;
+        let expired_at: Option<u64> = row.get(2)?;
+        let reason: Option<String> = row.get(3)?;
+        Ok((request_json, status, expired_at, reason))
+    })?;
+    for row in rows {
+        let (request_json, status, expired_at, reason) = row?;
+        let request: HumanRequest = serde_json::from_str(&request_json)?;
+        if status == "pending" && request.expires_at > now {
+            state.requests.insert(request.id, request);
+        } else {
+            state.trash.insert(
+                request.id,
+                ExpiredRequest {
+                    request,
+                    expired_at: expired_at.unwrap_or(now),
+                    reason: reason.unwrap_or_else(|| "Human request timed out".to_string()),
+                },
+            );
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -456,6 +612,17 @@ struct WsQuery {
 struct SearchQuery {
     q: Option<String>,
     tag: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadLateRepliesArgs {
+    request_id: Option<Uuid>,
+    since: Option<u64>,
+    #[serde(default)]
+    unread_only: bool,
+    #[serde(default)]
+    mark_read: bool,
+    limit: Option<u64>,
 }
 
 #[tokio::main]
@@ -487,6 +654,16 @@ async fn main() -> anyhow::Result<()> {
             get(github_oauth_callback),
         )
         .route("/api/me", get(me))
+        .route("/api/me/profile", get(me_profile).post(update_me_profile))
+        .route("/api/agent/access", get(agent_access))
+        .route(
+            "/api/admin/webhooks",
+            get(admin_webhooks).post(admin_update_webhooks),
+        )
+        .route(
+            "/api/integrations/wechat/clawbot/{id}",
+            post(clawbot_incoming),
+        )
         .route("/api/requests", get(list_requests))
         .route("/api/requests/{id}/answer", post(answer_request))
         .route("/api/trash", get(list_trash))
@@ -592,6 +769,7 @@ fn default_env_lines() -> Vec<String> {
         "HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp",
         "HUMEN_WEB_DIST=/usr/share/humen-mcp/web",
         "HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json",
+        "HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3",
         "HUMEN_ADMIN_EMAIL=<admin-email>",
         "HUMEN_ADMIN_PASSWORD=change-me",
         "HUMEN_SESSION_SECRET=change-this-to-a-long-random-secret",
@@ -631,23 +809,15 @@ async fn mcp_get() -> Response {
 }
 
 async fn auth_config(State(state): State<AppState>) -> Json<AuthConfigResponse> {
-    let mut settings = state
+    let settings = state
         .admin_settings
         .lock()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    if let Some(github) = settings
-        .oauth_channels
-        .iter_mut()
-        .find(|channel| channel.provider == "github")
-    {
-        github.enabled = state.github_enabled();
-        github.client_id = state.config.github_client_id.clone().unwrap_or_default();
-    }
     Json(AuthConfigResponse {
-        github_enabled: state.github_enabled(),
+        github_enabled: oauth_channel_enabled(&settings, "github") || state.github_enabled(),
         allow_registration: settings.allow_registration,
-        oauth_channels: settings.oauth_channels,
+        oauth_channels: public_oauth_channels(&settings.oauth_channels),
     })
 }
 
@@ -684,14 +854,7 @@ fn authenticate_password(
 }
 
 async fn github_oauth_start(State(state): State<AppState>) -> Result<Redirect, ApiError> {
-    if !state.github_enabled() {
-        return Err(ApiError::bad_request("GitHub OAuth is not configured"));
-    }
-    let client_id = state
-        .config
-        .github_client_id
-        .as_ref()
-        .ok_or_else(|| ApiError::bad_request("GitHub OAuth is not configured"))?;
+    let (client_id, _) = github_oauth_credentials(&state)?;
     let redirect_uri = format!(
         "{}/api/auth/oauth/github/callback",
         state.config.public_base_url.trim_end_matches('/')
@@ -706,19 +869,7 @@ async fn github_oauth_callback(
     State(state): State<AppState>,
     Query(query): Query<OAuthCallback>,
 ) -> Result<Redirect, ApiError> {
-    if !state.github_enabled() {
-        return Err(ApiError::bad_request("GitHub OAuth is not configured"));
-    }
-    let client_id = state
-        .config
-        .github_client_id
-        .as_ref()
-        .ok_or_else(|| ApiError::bad_request("GitHub OAuth is not configured"))?;
-    let client_secret = state
-        .config
-        .github_client_secret
-        .as_ref()
-        .ok_or_else(|| ApiError::bad_request("GitHub OAuth is not configured"))?;
+    let (client_id, client_secret) = github_oauth_credentials(&state)?;
 
     let oauth_response: Value = state
         .http
@@ -772,9 +923,147 @@ async fn github_oauth_callback(
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {
     let session = require_session(&state, &headers)?;
+    let profile = get_or_create_user_record(&state, &session.user.email)?;
     Ok(Json(json!({
         "user": session.user,
+        "profile": public_profile_from_record(&state, &profile),
         "created_at": session.created_at
+    })))
+}
+
+async fn me_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<PublicUserProfile>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let record = get_or_create_user_record(&state, &session.user.email)?;
+    Ok(Json(public_profile_from_record(&state, &record)))
+}
+
+async fn update_me_profile(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<ProfileUpdate>,
+) -> Result<Json<PublicUserProfile>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let email = normalize_email(&session.user.email);
+    let mut users = state
+        .users
+        .lock()
+        .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    let now = now_unix();
+    let record = users.users.entry(email.clone()).or_insert(UserRecord {
+        email: email.clone(),
+        created_at: now,
+        last_login_at: now,
+        profile: String::new(),
+        tags: Vec::new(),
+        ban_expires_at: None,
+        active_periods: Vec::new(),
+    });
+    record.profile = payload.profile;
+    record.tags = normalize_tags(payload.tags);
+    let record = record.clone();
+    users
+        .save(&state.config.users_file)
+        .map_err(|err| ApiError::internal(format!("failed to save profile: {err}")))?;
+    Ok(Json(public_profile_from_record(&state, &record)))
+}
+
+async fn agent_access(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let settings = state
+        .admin_settings
+        .lock()
+        .map_err(|_| ApiError::internal("settings lock poisoned"))?
+        .clone();
+    let mcp_url = mcp_public_url(&state.config.public_base_url);
+    let agent_secret = normalize_optional_value(settings.agent_secret.as_deref());
+    Ok(Json(json!({
+        "user": session.user.email,
+        "mcp_url": mcp_url,
+        "secret_required": agent_secret.is_some(),
+        "agent_secret": agent_secret.unwrap_or_default()
+    })))
+}
+
+async fn admin_webhooks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<WebhookConfig>>, ApiError> {
+    require_admin(&state, &headers)?;
+    let settings = state
+        .admin_settings
+        .lock()
+        .map_err(|_| ApiError::internal("settings lock poisoned"))?
+        .clone();
+    Ok(Json(settings.webhooks))
+}
+
+async fn admin_update_webhooks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<WebhooksUpdate>,
+) -> Result<Json<Vec<WebhookConfig>>, ApiError> {
+    require_admin(&state, &headers)?;
+    let mut settings = state
+        .admin_settings
+        .lock()
+        .map_err(|_| ApiError::internal("settings lock poisoned"))?
+        .clone();
+    settings.webhooks = payload.webhooks;
+    let sanitized = sanitize_admin_settings(settings);
+    {
+        let mut stored = state
+            .admin_settings
+            .lock()
+            .map_err(|_| ApiError::internal("settings lock poisoned"))?;
+        *stored = sanitized.clone();
+    }
+    persist_admin_settings(&state, &sanitized)?;
+    Ok(Json(sanitized.webhooks))
+}
+
+async fn clawbot_incoming(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Query(query): Query<IncomingSecretQuery>,
+    headers: HeaderMap,
+    Json(payload): Json<Value>,
+) -> Result<Json<Value>, ApiError> {
+    let webhook =
+        find_webhook(&state, id).ok_or_else(|| ApiError::bad_request("webhook not found"))?;
+    if !webhook.enabled {
+        return Err(ApiError::bad_request("webhook disabled"));
+    }
+    if let Some(expected) = normalize_optional_value(webhook.secret.as_deref()) {
+        let provided = headers
+            .get("x-humen-webhook-secret")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+            .or(query.secret);
+        if provided.as_deref() != Some(expected.as_str()) {
+            return Err(ApiError::unauthorized("missing or invalid webhook secret"));
+        }
+    }
+
+    let incoming = parse_clawbot_message(payload.clone());
+    let request = create_incoming_request(&state, &incoming);
+    dispatch_webhooks(
+        &state,
+        "message_received",
+        "wechat_clawbot",
+        &request,
+        Some(payload),
+    );
+    Ok(Json(json!({
+        "ok": true,
+        "request_id": request.id,
+        "source": incoming.source,
+        "sender": incoming.sender
     })))
 }
 
@@ -943,19 +1232,11 @@ async fn admin_settings(
     headers: HeaderMap,
 ) -> Result<Json<AdminSettings>, ApiError> {
     require_admin(&state, &headers)?;
-    let mut settings = state
+    let settings = state
         .admin_settings
         .lock()
         .map_err(|_| ApiError::internal("settings lock poisoned"))?
         .clone();
-    if let Some(github) = settings
-        .oauth_channels
-        .iter_mut()
-        .find(|channel| channel.provider == "github")
-    {
-        github.enabled = state.github_enabled();
-        github.client_id = state.config.github_client_id.clone().unwrap_or_default();
-    }
     Ok(Json(settings))
 }
 
@@ -965,12 +1246,16 @@ async fn admin_update_settings(
     Json(payload): Json<AdminSettings>,
 ) -> Result<Json<AdminSettings>, ApiError> {
     require_admin(&state, &headers)?;
-    let mut settings = state
-        .admin_settings
-        .lock()
-        .map_err(|_| ApiError::internal("settings lock poisoned"))?;
-    *settings = payload.clone();
-    Ok(Json(payload))
+    let sanitized = sanitize_admin_settings(payload);
+    {
+        let mut settings = state
+            .admin_settings
+            .lock()
+            .map_err(|_| ApiError::internal("settings lock poisoned"))?;
+        *settings = sanitized.clone();
+    }
+    persist_admin_settings(&state, &sanitized)?;
+    Ok(Json(sanitized))
 }
 
 async fn answer_request(
@@ -980,24 +1265,203 @@ async fn answer_request(
     Json(payload): Json<AnswerRequest>,
 ) -> Result<Json<Value>, ApiError> {
     let session = require_session(&state, &headers)?;
+    let now = now_unix();
     let answer = HumanAnswer {
         answer: payload.answer,
         note: payload.note,
         answered_by: session.user.email,
-        answered_at: now_unix(),
+        answered_at: now,
     };
 
-    state.requests.remove(&id);
+    let mut late = false;
+    let request = if let Some((_, request)) = state.requests.remove(&id) {
+        if now > request.expires_at {
+            late = true;
+        }
+        request
+    } else if let Some((_, expired)) = state.trash.remove(&id) {
+        late = true;
+        expired.request
+    } else if let Some((request, status)) = db_get_request(&state, id)? {
+        late = status == "expired" || now > request.expires_at;
+        request
+    } else {
+        return Err(ApiError::bad_request("request not found"));
+    };
+
     if let Some((_, waiter)) = state.waiters.remove(&id) {
         if waiter.send(answer.clone()).is_err() {
+            late = true;
             warn!(%id, "MCP caller already disconnected before human answer");
         }
+    } else {
+        late = true;
     }
+    db_store_answer(&state, &request, &answer, late)?;
     let _ = state.events.send(ServerEvent::RequestAnswered {
         id,
         answer: answer.clone(),
     });
-    Ok(Json(json!({ "ok": true, "answer": answer })))
+    Ok(Json(json!({ "ok": true, "answer": answer, "late": late })))
+}
+
+fn create_incoming_request(state: &AppState, incoming: &IncomingMessage) -> HumanRequest {
+    let now = now_unix();
+    let sender = incoming.sender.trim();
+    let title = if sender.is_empty() {
+        "微信消息".to_string()
+    } else {
+        format!("微信消息：{sender}")
+    };
+    let prompt = if incoming.content.trim().is_empty() {
+        serde_json::to_string_pretty(&incoming.raw)
+            .unwrap_or_else(|_| "收到一条微信消息".to_string())
+    } else {
+        incoming.content.clone()
+    };
+    let request = HumanRequest {
+        id: Uuid::new_v4(),
+        kind: TaskKind::Text,
+        title,
+        prompt,
+        choices: Vec::new(),
+        image_url: None,
+        image_base64: None,
+        image_mime_type: None,
+        steps: vec!["回复或处理这条来自个人微信 IM 的消息。".to_string()],
+        created_at: now,
+        timeout_seconds: 86400,
+        expires_at: now.saturating_add(86400),
+        tags: vec![
+            "#wechat".to_string(),
+            "#clawbot".to_string(),
+            "#webhook".to_string(),
+        ],
+    };
+    if let Err(err) = db_insert_request(state, &request) {
+        warn!(request_id = %request.id, error = %err.message, "failed to persist incoming request");
+    }
+    state.requests.insert(request.id, request.clone());
+    let _ = state.events.send(ServerEvent::RequestCreated {
+        request: request.clone(),
+    });
+    request
+}
+
+fn parse_clawbot_message(raw: Value) -> IncomingMessage {
+    let sender = first_string(
+        &raw,
+        &[
+            "sender",
+            "from",
+            "from_user",
+            "fromUser",
+            "from_user_name",
+            "fromUserName",
+            "wxid",
+            "user",
+            "nickname",
+            "remark",
+        ],
+    )
+    .unwrap_or_else(|| "wechat".to_string());
+    let content = first_string(
+        &raw,
+        &[
+            "content",
+            "text",
+            "message",
+            "msg",
+            "body",
+            "msg_content",
+            "msgContent",
+        ],
+    )
+    .unwrap_or_else(|| serde_json::to_string(&raw).unwrap_or_default());
+    IncomingMessage {
+        source: "wechat_clawbot".to_string(),
+        sender,
+        content,
+        raw,
+    }
+}
+
+fn first_string(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(found) = value.get(*key).and_then(Value::as_str) {
+            let found = found.trim();
+            if !found.is_empty() {
+                return Some(found.to_string());
+            }
+        }
+    }
+    if let Some(object) = value.as_object() {
+        for nested in object.values() {
+            if nested.is_object() {
+                if let Some(found) = first_string(nested, keys) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_webhook(state: &AppState, id: Uuid) -> Option<WebhookConfig> {
+    state
+        .admin_settings
+        .lock()
+        .ok()?
+        .webhooks
+        .iter()
+        .find(|webhook| webhook.id == id)
+        .cloned()
+}
+
+fn dispatch_webhooks(
+    state: &AppState,
+    event: &'static str,
+    source: &'static str,
+    request: &HumanRequest,
+    raw: Option<Value>,
+) {
+    let webhooks = state
+        .admin_settings
+        .lock()
+        .map(|settings| settings.webhooks.clone())
+        .unwrap_or_default();
+    let http = state.http.clone();
+    let request = request.clone();
+    let raw = raw.clone();
+    for webhook in webhooks
+        .into_iter()
+        .filter(|webhook| webhook.enabled && non_empty(Some(&webhook.url)))
+    {
+        let http = http.clone();
+        let payload = json!({
+            "event": event,
+            "source": source,
+            "webhook_id": webhook.id,
+            "request": request,
+            "raw": raw,
+            "sent_at": now_unix()
+        });
+        tokio::spawn(async move {
+            let mut req = http.post(webhook.url.trim()).json(&payload);
+            if let Some(secret) = normalize_optional_value(webhook.secret.as_deref()) {
+                req = req.header("x-humen-webhook-secret", secret);
+            }
+            match req.send().await {
+                Ok(response) if response.status().is_success() => {}
+                Ok(response) => warn!(
+                    webhook_id = %webhook.id,
+                    status = %response.status(),
+                    "webhook returned non-success status"
+                ),
+                Err(err) => warn!(webhook_id = %webhook.id, %err, "webhook delivery failed"),
+            }
+        });
+    }
 }
 
 async fn ws_handler(
@@ -1106,11 +1570,244 @@ fn expire_request(state: &AppState, id: Uuid, reason: String) -> Option<ExpiredR
         reason,
     };
     state.trash.insert(id, expired.clone());
+    if let Err(err) = db_mark_expired(state, &expired) {
+        warn!(%id, error = %err.message, "failed to persist expired request");
+    }
     let _ = state.events.send(ServerEvent::RequestExpired {
         id,
         expired_request: expired.clone(),
     });
     Some(expired)
+}
+
+fn db_insert_request(state: &AppState, request: &HumanRequest) -> Result<(), ApiError> {
+    let request_json = serde_json::to_string(request)
+        .map_err(|err| ApiError::internal(format!("serialize request: {err}")))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT OR REPLACE INTO human_requests \
+         (id, status, request_json, created_at, expires_at, expired_at, expire_reason, answer_json, answered_at, answered_late, read_at) \
+         VALUES (?1, 'pending', ?2, ?3, ?4, NULL, NULL, NULL, NULL, 0, NULL)",
+        params![
+            request.id.to_string(),
+            request_json,
+            request.created_at,
+            request.expires_at
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist request: {err}")))?;
+    Ok(())
+}
+
+fn db_mark_expired(state: &AppState, expired: &ExpiredRequest) -> Result<(), ApiError> {
+    let request_json = serde_json::to_string(&expired.request)
+        .map_err(|err| ApiError::internal(format!("serialize expired request: {err}")))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO human_requests \
+         (id, status, request_json, created_at, expires_at, expired_at, expire_reason, answered_late) \
+         VALUES (?1, 'expired', ?2, ?3, ?4, ?5, ?6, 0) \
+         ON CONFLICT(id) DO UPDATE SET \
+           status='expired', request_json=excluded.request_json, expired_at=excluded.expired_at, expire_reason=excluded.expire_reason",
+        params![
+            expired.request.id.to_string(),
+            request_json,
+            expired.request.created_at,
+            expired.request.expires_at,
+            expired.expired_at,
+            expired.reason
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist expired request: {err}")))?;
+    Ok(())
+}
+
+fn db_store_answer(
+    state: &AppState,
+    request: &HumanRequest,
+    answer: &HumanAnswer,
+    late: bool,
+) -> Result<(), ApiError> {
+    let request_json = serde_json::to_string(request)
+        .map_err(|err| ApiError::internal(format!("serialize request: {err}")))?;
+    let answer_json = serde_json::to_string(answer)
+        .map_err(|err| ApiError::internal(format!("serialize answer: {err}")))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO human_requests \
+         (id, status, request_json, created_at, expires_at, answer_json, answered_at, answered_late) \
+         VALUES (?1, 'answered', ?2, ?3, ?4, ?5, ?6, ?7) \
+         ON CONFLICT(id) DO UPDATE SET \
+           status='answered', request_json=excluded.request_json, answer_json=excluded.answer_json, \
+           answered_at=excluded.answered_at, answered_late=excluded.answered_late",
+        params![
+            request.id.to_string(),
+            request_json,
+            request.created_at,
+            request.expires_at,
+            answer_json,
+            answer.answered_at,
+            if late { 1 } else { 0 }
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist answer: {err}")))?;
+    Ok(())
+}
+
+fn db_get_request(state: &AppState, id: Uuid) -> Result<Option<(HumanRequest, String)>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let row = db
+        .query_row(
+            "SELECT request_json, status FROM human_requests WHERE id = ?1",
+            params![id.to_string()],
+            |row| {
+                let request_json: String = row.get(0)?;
+                let status: String = row.get(1)?;
+                Ok((request_json, status))
+            },
+        )
+        .optional()
+        .map_err(|err| ApiError::internal(format!("read request from sqlite: {err}")))?;
+    let Some((request_json, status)) = row else {
+        return Ok(None);
+    };
+    let request: HumanRequest = serde_json::from_str(&request_json)
+        .map_err(|err| ApiError::internal(format!("parse request from sqlite: {err}")))?;
+    Ok(Some((request, status)))
+}
+
+fn db_list_pending_requests(state: &AppState) -> Result<Vec<HumanRequest>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare("SELECT request_json FROM human_requests WHERE status = 'pending'")
+        .map_err(|err| ApiError::internal(format!("prepare pending query: {err}")))?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|err| ApiError::internal(format!("query pending requests: {err}")))?;
+    let mut requests = Vec::new();
+    for row in rows {
+        let raw = row.map_err(|err| ApiError::internal(format!("read pending request: {err}")))?;
+        requests.push(
+            serde_json::from_str(&raw)
+                .map_err(|err| ApiError::internal(format!("parse pending request: {err}")))?,
+        );
+    }
+    Ok(requests)
+}
+
+fn db_list_expired_requests(state: &AppState) -> Result<Vec<ExpiredRequest>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT request_json, expired_at, expire_reason FROM human_requests WHERE status = 'expired'",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare expired query: {err}")))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<u64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        })
+        .map_err(|err| ApiError::internal(format!("query expired requests: {err}")))?;
+    let mut expired = Vec::new();
+    for row in rows {
+        let (raw, expired_at, reason) =
+            row.map_err(|err| ApiError::internal(format!("read expired request: {err}")))?;
+        let request: HumanRequest = serde_json::from_str(&raw)
+            .map_err(|err| ApiError::internal(format!("parse expired request: {err}")))?;
+        expired.push(ExpiredRequest {
+            request,
+            expired_at: expired_at.unwrap_or_else(now_unix),
+            reason: reason.unwrap_or_else(|| "Human request timed out".to_string()),
+        });
+    }
+    Ok(expired)
+}
+
+fn db_read_late_replies(
+    state: &AppState,
+    args: ReadLateRepliesArgs,
+) -> Result<Vec<LateHumanReply>, ApiError> {
+    let request_id = args.request_id.map(|id| id.to_string());
+    let unread_only = if args.unread_only { 1 } else { 0 };
+    let limit = args.limit.unwrap_or(50).clamp(1, 200);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT id, request_json, answer_json, expired_at, read_at \
+             FROM human_requests \
+             WHERE status = 'answered' \
+               AND answered_late = 1 \
+               AND (?1 IS NULL OR id = ?1) \
+               AND (?2 IS NULL OR answered_at >= ?2) \
+               AND (?3 = 0 OR read_at IS NULL) \
+             ORDER BY answered_at DESC \
+             LIMIT ?4",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare late replies query: {err}")))?;
+    let rows = stmt
+        .query_map(params![request_id, args.since, unread_only, limit], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<u64>>(3)?,
+                row.get::<_, Option<u64>>(4)?,
+            ))
+        })
+        .map_err(|err| ApiError::internal(format!("query late replies: {err}")))?;
+    let mut ids = Vec::new();
+    let mut replies = Vec::new();
+    for row in rows {
+        let (id, request_json, answer_json, expired_at, read_at) =
+            row.map_err(|err| ApiError::internal(format!("read late reply: {err}")))?;
+        let request: HumanRequest = serde_json::from_str(&request_json)
+            .map_err(|err| ApiError::internal(format!("parse late request: {err}")))?;
+        let answer: HumanAnswer = serde_json::from_str(&answer_json)
+            .map_err(|err| ApiError::internal(format!("parse late answer: {err}")))?;
+        ids.push(id);
+        replies.push(LateHumanReply {
+            request,
+            answer,
+            expired_at,
+            answered_late: true,
+            read_at,
+        });
+    }
+    if args.mark_read && !ids.is_empty() {
+        let read_at = now_unix();
+        for id in ids {
+            db.execute(
+                "UPDATE human_requests SET read_at = COALESCE(read_at, ?1) WHERE id = ?2",
+                params![read_at, id],
+            )
+            .map_err(|err| ApiError::internal(format!("mark late reply read: {err}")))?;
+        }
+    }
+    Ok(replies)
 }
 
 async fn trash_cleanup_loop(state: AppState) {
@@ -1183,6 +1880,7 @@ fn end_active_period(state: &AppState, email: &str, active_index: Option<usize>)
 
 async fn mcp(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<McpRequest>,
 ) -> Result<Json<Value>, ApiError> {
     if payload.jsonrpc.as_deref() != Some("2.0") {
@@ -1191,6 +1889,9 @@ async fn mcp(
             -32600,
             "expected JSON-RPC 2.0 request",
         )));
+    }
+    if let Err(err) = require_agent_access(&state, &headers) {
+        return Ok(Json(mcp_error(payload.id, -32003, err.message)));
     }
 
     let id = payload.id.clone();
@@ -1295,6 +1996,8 @@ async fn call_tool(state: AppState, payload: McpRequest) -> Result<Json<Value>, 
     let mut tag_sources = vec![create.title.as_str(), create.prompt.as_str()];
     tag_sources.extend(create.steps.iter().map(String::as_str));
     let tags = extract_tags(&tag_sources);
+    let (image_base64, image_mime_type) =
+        normalize_image_payload(create.image_base64, create.image_mime_type);
     let request = HumanRequest {
         id: Uuid::new_v4(),
         kind: create.kind,
@@ -1302,6 +2005,8 @@ async fn call_tool(state: AppState, payload: McpRequest) -> Result<Json<Value>, 
         prompt: create.prompt,
         choices: create.choices,
         image_url: create.image_url,
+        image_base64,
+        image_mime_type,
         steps: create.steps,
         created_at: now,
         timeout_seconds,
@@ -1315,6 +2020,7 @@ async fn call_tool(state: AppState, payload: McpRequest) -> Result<Json<Value>, 
     let _ = state.events.send(ServerEvent::RequestCreated {
         request: request.clone(),
     });
+    dispatch_webhooks(&state, "request_created", "mcp", &request, None);
 
     match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(answer)) => Ok(Json(json!({
@@ -1392,6 +2098,15 @@ fn ask_humen_schema() -> Value {
                 "items": { "type": "string" }
             },
             "image_url": { "type": "string" },
+            "image_base64": {
+                "type": "string",
+                "description": "Raw base64 image bytes, or a data:image/...;base64,... URL."
+            },
+            "image_mime_type": {
+                "type": "string",
+                "default": "image/png",
+                "description": "MIME type for image_base64, e.g. image/png or image/jpeg."
+            },
             "steps": {
                 "type": "array",
                 "items": { "type": "string" }
@@ -1412,6 +2127,39 @@ fn require_session(state: &AppState, headers: &HeaderMap) -> Result<Session, Api
         .ok_or_else(|| ApiError::unauthorized("missing or invalid bearer token"))?;
     ensure_user_allowed(state, &session.user.email)?;
     Ok(session)
+}
+
+fn github_oauth_credentials(state: &AppState) -> Result<(String, String), ApiError> {
+    if state.github_enabled() {
+        return Ok((
+            state.config.github_client_id.clone().unwrap_or_default(),
+            state
+                .config
+                .github_client_secret
+                .clone()
+                .unwrap_or_default(),
+        ));
+    }
+    let settings = state
+        .admin_settings
+        .lock()
+        .map_err(|_| ApiError::internal("settings lock poisoned"))?;
+    let channel = settings
+        .oauth_channels
+        .iter()
+        .find(|channel| channel.provider == "github" && channel.enabled)
+        .ok_or_else(|| ApiError::bad_request("GitHub OAuth is not configured"))?;
+    let client_secret = channel
+        .client_secret
+        .as_ref()
+        .filter(|secret| !secret.trim().is_empty())
+        .ok_or_else(|| ApiError::bad_request("GitHub OAuth client secret is not configured"))?;
+    if channel.client_id.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "GitHub OAuth client id is not configured",
+        ));
+    }
+    Ok((channel.client_id.clone(), client_secret.clone()))
 }
 
 fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<Session, ApiError> {
@@ -1540,6 +2288,190 @@ fn user_profiles(
     Ok(profiles)
 }
 
+fn get_or_create_user_record(state: &AppState, email: &str) -> Result<UserRecord, ApiError> {
+    let email = normalize_email(email);
+    let mut users = state
+        .users
+        .lock()
+        .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    let now = now_unix();
+    let record = users.users.entry(email.clone()).or_insert(UserRecord {
+        email: email.clone(),
+        created_at: now,
+        last_login_at: now,
+        profile: default_profile_template(&email),
+        tags: Vec::new(),
+        ban_expires_at: None,
+        active_periods: Vec::new(),
+    });
+    let record = record.clone();
+    users
+        .save(&state.config.users_file)
+        .map_err(|err| ApiError::internal(format!("failed to save user profile: {err}")))?;
+    Ok(record)
+}
+
+fn public_profile_from_record(state: &AppState, record: &UserRecord) -> PublicUserProfile {
+    let online = online_emails(state);
+    let email = normalize_email(&record.email);
+    let provider = if email == normalize_email(&state.config.admin_email) {
+        AuthProvider::Password
+    } else {
+        AuthProvider::Github
+    };
+    PublicUserProfile {
+        email: record.email.clone(),
+        provider,
+        profile: record.profile.clone(),
+        tags: record.tags.clone(),
+        online: online.contains_key(&email),
+        last_login_at: record.last_login_at,
+        ban_expires_at: record.ban_expires_at,
+    }
+}
+
+fn default_profile_template(email: &str) -> String {
+    format!(
+        "Hi, I am {email}.\n\nSkills: #review #ops\nAvailable for: short human-in-the-loop checks\nNotes: timezone, language, escalation preferences"
+    )
+}
+
+fn public_oauth_channels(channels: &[OAuthChannel]) -> Vec<OAuthChannel> {
+    channels
+        .iter()
+        .cloned()
+        .map(|mut channel| {
+            channel.client_secret = None;
+            channel
+        })
+        .collect()
+}
+
+fn persist_admin_settings(state: &AppState, settings: &AdminSettings) -> Result<(), ApiError> {
+    let mut users = state
+        .users
+        .lock()
+        .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    users.admin_settings = settings.clone();
+    users
+        .save(&state.config.users_file)
+        .map_err(|err| ApiError::internal(format!("failed to save admin settings: {err}")))
+}
+
+fn oauth_channel_enabled(settings: &AdminSettings, provider: &str) -> bool {
+    let provider = normalize_oauth_provider(provider);
+    settings.oauth_channels.iter().any(|channel| {
+        channel.provider == provider
+            && channel.enabled
+            && non_empty(Some(channel.client_id.as_str()))
+            && non_empty(channel.client_secret.as_deref())
+    })
+}
+
+fn sanitize_admin_settings(mut settings: AdminSettings) -> AdminSettings {
+    settings.agent_secret = normalize_optional_value(settings.agent_secret.as_deref());
+    for channel in &mut settings.oauth_channels {
+        channel.provider = normalize_oauth_provider(&channel.provider);
+        channel.client_id = channel.client_id.trim().to_string();
+        channel.client_secret = channel
+            .client_secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty())
+            .map(str::to_string);
+    }
+    settings
+        .oauth_channels
+        .retain(|channel| !channel.provider.is_empty());
+    for webhook in &mut settings.webhooks {
+        webhook.name = webhook.name.trim().to_string();
+        webhook.url = webhook.url.trim().to_string();
+        webhook.secret = normalize_optional_value(webhook.secret.as_deref());
+        webhook.kind = normalize_webhook_kind(&webhook.kind);
+        if webhook.name.is_empty() {
+            webhook.name = match webhook.kind.as_str() {
+                "wechat_clawbot" => "微信 clawbot".to_string(),
+                _ => "Webhook".to_string(),
+            };
+        }
+    }
+    settings
+        .webhooks
+        .retain(|webhook| !webhook.url.is_empty() || webhook.kind == "wechat_clawbot");
+    settings
+}
+
+fn normalize_webhook_kind(kind: &str) -> String {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "wechat" | "clawbot" | "wechat_clawbot" => "wechat_clawbot".to_string(),
+        _ => "generic".to_string(),
+    }
+}
+
+fn normalize_oauth_provider(provider: &str) -> String {
+    provider
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+fn normalize_optional_value(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn require_agent_access(state: &AppState, headers: &HeaderMap) -> Result<(), ApiError> {
+    let expected = {
+        let settings = state
+            .admin_settings
+            .lock()
+            .map_err(|_| ApiError::internal("settings lock poisoned"))?;
+        normalize_optional_value(settings.agent_secret.as_deref())
+    };
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let provided = headers
+        .get("x-humen-agent-secret")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            headers
+                .get(header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .map(str::to_string)
+        });
+    if provided.as_deref() == Some(expected.as_str()) {
+        Ok(())
+    } else {
+        Err(ApiError::unauthorized(
+            "agent secret is required for this MCP server",
+        ))
+    }
+}
+
+fn mcp_public_url(base_url: &str) -> String {
+    let base = base_url.trim_end_matches('/');
+    if base.ends_with("/mcp") {
+        base.to_string()
+    } else {
+        format!("{base}/mcp")
+    }
+}
+
 fn tag_counts(state: &AppState) -> Result<Vec<Value>, ApiError> {
     let users = state
         .users
@@ -1621,6 +2553,53 @@ fn extract_tags(values: &[&str]) -> Vec<String> {
         }
     }
     normalize_tags(tags)
+}
+
+fn normalize_image_payload(
+    image_base64: Option<String>,
+    image_mime_type: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let Some(raw) = image_base64.map(|value| value.trim().to_string()) else {
+        return (None, None);
+    };
+    if raw.is_empty() {
+        return (None, None);
+    }
+
+    if let Some(data_url) = raw.strip_prefix("data:") {
+        if let Some((metadata, data)) = data_url.split_once(',') {
+            let metadata_lower = metadata.to_ascii_lowercase();
+            if metadata_lower.ends_with(";base64") {
+                let mime = metadata[..metadata.len().saturating_sub(";base64".len())].trim();
+                return (
+                    Some(strip_base64_whitespace(data)),
+                    Some(normalize_image_mime_type(Some(mime))),
+                );
+            }
+        }
+    }
+
+    (
+        Some(strip_base64_whitespace(&raw)),
+        Some(normalize_image_mime_type(image_mime_type.as_deref())),
+    )
+}
+
+fn normalize_image_mime_type(value: Option<&str>) -> String {
+    let mime = value.unwrap_or("image/png").trim().to_ascii_lowercase();
+    if mime.starts_with("image/")
+        && mime
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '+' | '-'))
+    {
+        mime
+    } else {
+        "image/png".to_string()
+    }
+}
+
+fn strip_base64_whitespace(value: &str) -> String {
+    value.chars().filter(|ch| !ch.is_whitespace()).collect()
 }
 
 fn normalize_email(email: &str) -> String {
@@ -1762,6 +2741,8 @@ mod tests {
             web_dist: "./humen-mcp-webui/dist".to_string(),
             users_file: std::env::temp_dir()
                 .join(format!("humen-mcp-test-{}.json", Uuid::new_v4())),
+            db_file: std::env::temp_dir()
+                .join(format!("humen-mcp-test-{}.sqlite3", Uuid::new_v4())),
             admin_email: "admin-local".to_string(),
             admin_password: "secret".to_string(),
             session_secret: "test-session-secret".to_string(),
@@ -1785,7 +2766,29 @@ mod tests {
             schema["properties"]["timeout_seconds"]["default"],
             json!(60)
         );
+        assert_eq!(
+            schema["properties"]["image_mime_type"]["default"],
+            json!("image/png")
+        );
+        assert!(schema["properties"].get("image_base64").is_some());
         assert_eq!(default_timeout(), 60);
+    }
+
+    #[test]
+    fn normalize_image_payload_accepts_raw_base64_and_data_urls() {
+        let (data, mime) = normalize_image_payload(
+            Some(" iVBOR\nw0KGgo= ".to_string()),
+            Some("image/jpeg".to_string()),
+        );
+        assert_eq!(data.as_deref(), Some("iVBORw0KGgo="));
+        assert_eq!(mime.as_deref(), Some("image/jpeg"));
+
+        let (data, mime) = normalize_image_payload(
+            Some("data:image/webp;base64, AAAA ".to_string()),
+            Some("image/png".to_string()),
+        );
+        assert_eq!(data.as_deref(), Some("AAAA"));
+        assert_eq!(mime.as_deref(), Some("image/webp"));
     }
 
     #[test]
@@ -1798,6 +2801,8 @@ mod tests {
             prompt: "Say ok".to_string(),
             choices: Vec::new(),
             image_url: None,
+            image_base64: None,
+            image_mime_type: None,
             steps: Vec::new(),
             created_at: 100,
             timeout_seconds: 60,

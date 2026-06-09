@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version, e.g. 0.1.3 or v0.1.3"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  package-and-release:
+    name: Package and publish release
+    runs-on: ubuntu-latest
+
+    env:
+      CARGO_TERM_COLOR: always
+      TARGET: x86_64-unknown-linux-gnu
+      INPUT_VERSION: ${{ github.event.inputs.version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Checkout web UI submodule
+        run: git submodule update --init humen-mcp-webui
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Set up Rust stable
+        run: |
+          rustup update stable
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+          else
+            version="${INPUT_VERSION#v}"
+            tag="v${version}"
+          fi
+
+          if [[ -z "${version}" || "${version}" == "${tag}" ]]; then
+            echo "Invalid version: '${version}'" >&2
+            exit 1
+          fi
+
+          cargo_version="$(grep -m1 '^version = ' Cargo.toml | sed -E 's/version = "([^"]+)"/\1/')"
+          if [[ "${version}" != "${cargo_version}" ]]; then
+            echo "Version mismatch: requested ${version}, but Cargo.toml is ${cargo_version}" >&2
+            exit 1
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "Release tag: ${tag}"
+          echo "Release version: ${version}"
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+      - name: Package release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          scripts/package-release.sh "${{ steps.version.outputs.version }}" | tee dist-release/checksums.txt
+          asset="dist-release/humen-mcp-${{ steps.version.outputs.version }}-${TARGET}.tar.gz"
+          test -f "${asset}"
+          sha256sum "${asset}" > "${asset}.sha256"
+          ls -lh "${asset}" "${asset}.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: humen-mcp-${{ steps.version.outputs.version }}-${{ env.TARGET }}
+          path: |
+            dist-release/humen-mcp-${{ steps.version.outputs.version }}-${{ env.TARGET }}.tar.gz
+            dist-release/humen-mcp-${{ steps.version.outputs.version }}-${{ env.TARGET }}.tar.gz.sha256
+            dist-release/checksums.txt
+          if-no-files-found: error
+
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          asset="dist-release/humen-mcp-${VERSION}-${TARGET}.tar.gz"
+          checksum="${asset}.sha256"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${asset}" "${checksum}" --clobber
+          else
+            gh release create "${TAG}" "${asset}" "${checksum}" \
+              --target "${GITHUB_SHA}" \
+              --title "${TAG}" \
+              --generate-notes
+          fi

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-version="${1:-0.1.0}"
+version="${1:-0.1.3}"
 target="${TARGET:-x86_64-unknown-linux-gnu}"
 out_dir="${OUT_DIR:-dist-release}"
 name="humen-mcp-${version}-${target}"
