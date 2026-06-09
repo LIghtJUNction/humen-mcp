@@ -1,21 +1,218 @@
 # humen-mcp
 
-Human-in-the-loop MCP server. Agents call MCP tools, `humen-mcp` turns the call into a human task envelope, a logged-in human answers it in the web UI, and the waiting MCP call receives the answer.
+<div align="center">
+  <img src="humen-mcp-webui/src/assets/logo.svg" width="96" height="96" alt="humen-mcp logo" />
 
-## What it provides
+  <h3>Ask a real human from an MCP tool call.</h3>
+
+  <p>
+    A human-in-the-loop MCP server for moments where agents need judgment, visual review, account-bound action, or a short escalation path.
+  </p>
+
+  <p>
+    <a href="#english">English</a>
+    ·
+    <a href="#中文速览">简体中文</a>
+    ·
+    <a href="#why-people-care">Why it matters</a>
+    ·
+    <a href="#online-panel">Online panel</a>
+    ·
+    <a href="#deploy-with-an-agent">Deploy</a>
+    ·
+    <a href="#security-model">Security</a>
+    ·
+    <a href="#technical-details">Technical details</a>
+  </p>
+</div>
+
+<p align="center">
+  <a href="https://github.com/LIghtJUNction/humen-mcp/actions/workflows/release.yml"><img alt="Release workflow" src="https://github.com/LIghtJUNction/humen-mcp/actions/workflows/release.yml/badge.svg" /></a>
+  <a href="https://github.com/LIghtJUNction/humen-mcp/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/LIghtJUNction/humen-mcp?display_name=tag&sort=semver" /></a>
+  <a href="Cargo.toml"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green.svg" /></a>
+  <a href="Cargo.toml"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-f46623?logo=rust&logoColor=white" /></a>
+  <a href="https://modelcontextprotocol.io/"><img alt="MCP" src="https://img.shields.io/badge/MCP-human--in--the--loop-6f42c1" /></a>
+  <a href="Cargo.toml"><img alt="Axum backend" src="https://img.shields.io/badge/backend-Axum-005f73" /></a>
+  <a href="humen-mcp-webui/package.json"><img alt="React 19 frontend" src="https://img.shields.io/badge/frontend-React%2019-61dafb?logo=react&logoColor=111111" /></a>
+  <a href="humen-mcp-webui/package.json"><img alt="Bun runtime" src="https://img.shields.io/badge/runtime-Bun-000000?logo=bun&logoColor=white" /></a>
+  <a href="#deploy-with-an-agent"><img alt="AUR packages" src="https://img.shields.io/badge/packages-AUR-1793d1?logo=archlinux&logoColor=white" /></a>
+  <a href="#security-model"><img alt="Passkeys and OAuth" src="https://img.shields.io/badge/auth-Passkeys%20%2B%20GitHub%20OAuth-2ea44f" /></a>
+</p>
+
+## English
+
+`humen-mcp` lets an agent ask a logged-in person for help without leaving the MCP loop. The agent calls a tool, the server creates a task, the human answers in the web UI, and the agent receives the result.
+
+Use it when a workflow needs a person for one small but important step: choosing between options, reading an image, checking a website, retrieving an account-bound code, approving a risky action, or escalating an ambiguous decision.
+
+## 中文速览
+
+`humen-mcp` 是一个 human-in-the-loop MCP 服务器：智能体发起 MCP 工具调用，服务端把它变成一个人类任务，登录用户在 Web UI 里回答，智能体拿到结果继续执行。
+
+它适合那些“不该完全自动化，但又不想打断整个工作流”的步骤：选择确认、图片审阅、账号内操作、短信验证码、风险动作审批、模糊问题升级。
+
+## Online Panel
+
+| Purpose | URL |
+| --- | --- |
+| Human workbench | <https://humen.lmm.best/mcp/> |
+| MCP endpoint | <https://humen.lmm.best/mcp> |
+
+Use the trailing slash for the browser panel: `/mcp/`. Use the no-trailing-slash endpoint for MCP JSON-RPC: `/mcp`.
+
+## Login And Registration
+
+Use **GitHub OAuth** to register and log in to the public panel at <https://humen.lmm.best/mcp/>. More login methods can be added later.
+
+Normal users do not need a password. There is no ordinary user password to remember, store, or leak. After logging in, users can add a passkey and use passwordless sign-in on supported devices.
+
+Email/password login is only for the administrator account. The admin password is a strong private secret and should not be published in README, issues, screenshots, examples, or user-facing setup guides.
+
+## Why People Care
+
+| When the agent hits this | `humen-mcp` gives it this |
+| --- | --- |
+| Needs judgment, not more tokens | A typed human task with title, prompt, choices, image, steps, and timeout |
+| Needs a real account holder | A logged-in human workbench with identity, presence, and answer history |
+| Cannot wait inside one request | Async task creation plus later polling with `read_humen_replies` |
+| Needs the right human | Profiles, tags, friends, online status, and reputation-aware discovery |
+| Needs operational deployment | Rust server, React UI, systemd, nginx, AUR packages, and release workflow |
+
+## How It Feels
+
+```mermaid
+flowchart LR
+    A[Agent] -->|calls MCP tool| B[/POST /mcp/]
+    B --> C[Task envelope]
+    C --> D[Human workbench]
+    D -->|answer| E[Result or reply mailbox]
+    E --> A
+
+    C -. timeout .-> F[Expired request]
+    F --> G[Trash and structured MCP error]
+```
+
+The important design choice: the agent does not directly control a person. It creates a bounded task envelope with a type, owner, prompt, timeout, and lifecycle.
+
+## Most Interesting Parts
+
+| Piece | Why it is useful |
+| --- | --- |
+| Blocking and async asks | Use `ask_humen` when the agent should wait; use `ask_humen_*_async` when the agent should keep moving. |
+| Typed tasks | Text, choice, yes/no judgment, image review, and step-by-step tasks get clearer UI than a single free-form prompt. |
+| Human directory | Agents can discover online humans by profile, tag, friend graph, and reputation, subject to server visibility rules. |
+| Agent-bound identity | Each human has an agent secret, so MCP requests are tied back to a specific human account instead of a global anonymous token. |
+| Practical server packaging | The repo includes nginx routing, systemd units, Arch/AUR packaging, release artifacts, and admin-triggered updates. |
+
+## Deploy With An Agent
+
+Copy this command, run it anywhere with internet access, then send the fetched prompt to the agent that will deploy `humen-mcp` on your server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/LIghtJUNction/humen-mcp/main/docs/AGENT_DEPLOY_PROMPT.md
+```
+
+The prompt tells the agent to inspect the server, install the package, configure `/mcp`, verify the MCP endpoint, and keep admin secrets out of public output.
+
+<details>
+<summary><strong>Manual Server Deployment Guide</strong></summary>
+
+This is the short human-run path for an Arch Linux server. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the longer deployment note.
+
+1. Install the package:
+
+```bash
+paru -S humen-mcp-git
+# or, after a GitHub Release exists:
+paru -S humen-mcp-bin
+```
+
+2. Initialize the private admin login:
+
+```bash
+sudo humen-mcp init-admin --email <admin-email>
+sudoedit /etc/humen-mcp.env
+```
+
+3. Set the public URL and packaged web directory:
+
+```bash
+HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
+HUMEN_WEB_DIST=/usr/share/humen-mcp/web
+```
+
+4. Enable GitHub OAuth for normal users by setting the GitHub client id and secret in `/etc/humen-mcp.env`:
+
+```bash
+HUMEN_GITHUB_CLIENT_ID=<github-oauth-client-id>
+HUMEN_GITHUB_CLIENT_SECRET=<github-oauth-client-secret>
+```
+
+5. Start the service:
+
+```bash
+sudo systemctl enable --now humen-mcp.service
+curl -fsS http://127.0.0.1:8787/healthz
+```
+
+6. Configure nginx so:
+
+- `location = /mcp` proxies to backend `/mcp` for MCP JSON-RPC.
+- `location /mcp/` proxies to the web UI and static assets.
+
+7. Verify:
+
+```bash
+curl -fsS https://your-domain.example/mcp/api/auth/config
+curl -i https://your-domain.example/mcp/
+```
+
+The panel should load at `https://your-domain.example/mcp/`. Normal users should register with GitHub OAuth, then optionally add a passkey.
+
+</details>
+
+## Security Model
+
+`humen-mcp` is designed to make the trust boundary explicit: agents may request help, but humans, admins, and server policy decide what is visible and who may act.
+
+| Boundary | Mechanism |
+| --- | --- |
+| Agent access | MCP calls require a per-human agent secret through `x-humen-agent-secret` or `Authorization: Bearer ...`. |
+| Human access | Normal users log in with GitHub OAuth and can add passkeys for passwordless sign-in. |
+| Admin access | Admin APIs call `require_admin`; email/password login is reserved for the administrator and should stay private. |
+| Directory privacy | Agent directory visibility defaults to `self_only`; optional modes expose friends, public users, or users above a reputation threshold. |
+| Reserved identity | `#admin` is reserved. Users and agents cannot assign it through profiles or task text. |
+| Task containment | Requests have typed payloads, required title/prompt validation, normalized choices/tags, and server-clamped timeouts. |
+| Runtime containment | The packaged service runs as the `humen-mcp` user with `ProtectSystem=strict`, `ProtectHome=true`, and write access limited to `/var/lib/humen-mcp`. |
+| Self-update containment | The web UI can only trigger a configured update command. Packaged sudoers limits this to starting `humen-mcp-self-update.service`. |
+| Secret hygiene | Ordinary users have no password to leak. Session tokens are stored in memory as SHA-256 hashes keyed by `HUMEN_SESSION_SECRET`; OAuth client secrets are not returned by public config APIs. |
+
+Human answers are still input. Treat them like any other external result: validate before using them for destructive actions, run the service behind HTTPS, and protect `/etc/humen-mcp.env`.
+
+## Technical Details
+
+The rest is folded so the README stays readable. Open only what you need.
+
+<details>
+<summary><strong>What It Provides</strong></summary>
 
 - MCP JSON-RPC endpoint at `/mcp`.
 - Human workbench web UI served under `/mcp/`.
 - Rust backend with REST APIs and WebSocket updates.
 - Bun/Vite/React frontend in the `humen-mcp-webui` git submodule.
+- Blocking and async human request tools for text, choice, yes/no judgment, image review, and step-by-step tasks.
+- Per-human agent access secrets, public profiles, tags, friends, reputation, reports, and online presence.
 - AUR packages for Arch Linux:
   - `humen-mcp-git`: builds from GitHub source.
   - `humen-mcp-bin`: installs a GitHub Release tarball.
-- Admin password login plus optional GitHub OAuth for non-admin humans.
+- Admin-only password login, GitHub OAuth registration for normal users, and passkey sign-in support.
 - Live presence count and persisted active periods in the users JSON file.
-- Request envelope lifecycle: pending, answered, expired, trash.
+- Request envelope lifecycle: pending, answered, expired, trash, plus persisted late replies for async tools.
 
-## Important paths
+</details>
+
+<details>
+<summary><strong>Important Paths</strong></summary>
 
 | Purpose | Path |
 | --- | --- |
@@ -25,12 +222,16 @@ Human-in-the-loop MCP server. Agents call MCP tools, `humen-mcp` turns the call 
 | Packaged web dist | `/usr/share/humen-mcp/web` |
 | Service env file | `/etc/humen-mcp.env` |
 | User/activity store | `/var/lib/humen-mcp/users.json` |
+| SQLite store | `/var/lib/humen-mcp/humen-mcp.sqlite3` |
 | systemd unit | `humen-mcp.service` |
 | self-update unit | `humen-mcp-self-update.service` |
 
 `GET /mcp` is intentionally not the UI; it returns a method warning. Open the UI at `/mcp/` with the trailing slash.
 
-## Local development
+</details>
+
+<details>
+<summary><strong>Local Development</strong></summary>
 
 ```bash
 cp env.example .env
@@ -56,7 +257,10 @@ cd humen-mcp-webui && bun run build
 curl -fsS http://127.0.0.1:8787/healthz
 ```
 
-## MCP tools
+</details>
+
+<details>
+<summary><strong>MCP Tools</strong></summary>
 
 Implemented MCP methods:
 
@@ -67,10 +271,21 @@ Implemented MCP methods:
 
 Current tools include:
 
-- `ask_humen`
-- `list_online_humens`
-- `search_humen_profiles`
-- `list_humen_tags`
+| Tool | Purpose |
+| --- | --- |
+| `ask_humen` | Create a human request and wait for the answer. |
+| `ask_humen_async` | Create a human request and return a `request_id` immediately. |
+| `ask_humen_text_async` | Create a non-blocking text-answer request. |
+| `ask_humen_choice_async` | Create a non-blocking choice request. |
+| `ask_humen_judgment_async` | Create a non-blocking yes/no judgment request. |
+| `read_humen_replies` | Read completed replies for the user attached to this agent secret. |
+| `create_humen_task` | Create a visible AI task for the human account attached to this agent secret. |
+| `list_humen_tasks` | List AI-created tasks for the attached human account. |
+| `list_online_humens` | List online human operators and public profiles visible to this agent. |
+| `search_humen_profiles` | Search visible human profiles by text or `#tag`. |
+| `list_humen_tags` | List visible `#tag` usage counts. |
+| `rate_humen` | Rate a human from 0 to 10. |
+| `report_humen` | Report a human to the administrator mailbox and apply a zero rating from this actor. |
 
 ### `ask_humen`
 
@@ -78,7 +293,7 @@ Current tools include:
 
 ```json
 {
-  "kind": "choice|text|image_review|steps",
+  "kind": "choice|judgment|text|image_review|steps",
   "title": "Short task title",
   "prompt": "What the human should do",
   "choices": ["A", "B"],
@@ -86,15 +301,16 @@ Current tools include:
   "image_base64": "iVBORw0KGgo...",
   "image_mime_type": "image/png",
   "steps": ["Open the site", "Read the SMS code"],
-  "timeout_seconds": 60
+  "timeout_seconds": 60,
+  "background": false
 }
 ```
 
 Image review tasks may use either `image_url` or `image_base64`. `image_base64` may be raw base64 bytes or a full `data:image/...;base64,...` URL. When raw base64 is used, `image_mime_type` defaults to `image/png`.
 
-`timeout_seconds` is agent-configurable. If omitted, the backend uses 60 seconds;
-values are clamped by the server before the envelope is created. The backend
-creates an envelope:
+`timeout_seconds` is agent-configurable. If omitted, the backend uses 60 seconds. Values are clamped by the server before the envelope is created. The blocking tool waits for the answer. The async tools return a `request_id` immediately; poll `read_humen_replies` to collect completed replies.
+
+The backend creates an envelope:
 
 ```json
 {
@@ -124,24 +340,44 @@ If the human does not answer in time, the request is removed from pending, added
 }
 ```
 
-Example payloads are in `examples/`.
+Example payloads are in `examples/`; `examples/README.md` maps each file to the
+current MCP tool schema.
 
-Tags are normalized to lowercase `#tag` values. `#admin` is a reserved tag:
-clients and agents cannot assign it through profile updates or task text, and the
-backend only derives it for the configured admin identity.
+Tags are normalized to lowercase `#tag` values. `#admin` is a reserved tag: clients and agents cannot assign it through profile updates or task text, and the backend only derives it for the configured admin identity.
 
-## HTTP and WebSocket API
+</details>
+
+<details>
+<summary><strong>HTTP and WebSocket API</strong></summary>
 
 Authenticated UI APIs:
 
 - `GET /api/me`
+- `GET /api/me/profile`
+- `POST /api/me/profile`
+- `GET /api/passkeys`
+- `POST /api/passkeys/register/start`
+- `POST /api/passkeys/register/finish`
+- `POST /api/passkeys/{id}/delete`
+- `GET /api/agent/access`
+- `POST /api/agent/secret`
 - `GET /api/requests`
 - `POST /api/requests/{id}/answer`
+- `GET /api/sent`
+- `GET /api/tasks`
+- `POST /api/tasks/{id}/status`
 - `GET /api/trash`
 - `POST /api/trash/clear`
 - `GET /api/users/online`
 - `GET /api/users/search?q=...`
+- `POST /api/humans/rate`
+- `POST /api/humans/report`
+- `GET /api/leaderboard`
 - `GET /api/tags`
+- `GET /api/friends`
+- `POST /api/friends`
+- `POST /api/friends/{email}/accept`
+- `POST /api/friends/{email}/remove`
 - `GET /api/ws`
 
 Admin APIs:
@@ -150,10 +386,13 @@ Admin APIs:
 - `POST /api/admin/users`
 - `POST /api/admin/users/{email}`
 - `POST /api/admin/users/{email}/kick`
+- `GET /api/admin/reports`
 - `GET /api/admin/settings`
 - `POST /api/admin/settings`
 - `GET /api/admin/update`
 - `POST /api/admin/update`
+- `GET /api/admin/webhooks`
+- `POST /api/admin/webhooks`
 
 WebSocket events:
 
@@ -165,7 +404,10 @@ WebSocket events:
 { "type": "presence_changed", "online_count": 1 }
 ```
 
-## Configuration
+</details>
+
+<details>
+<summary><strong>Configuration</strong></summary>
 
 `env.example` documents all supported variables. Important production values:
 
@@ -174,6 +416,7 @@ HUMEN_BIND=127.0.0.1:8787
 HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
+HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3
 HUMEN_ADMIN_EMAIL=<admin-email>
 HUMEN_ADMIN_PASSWORD=<generated-admin-password>
 HUMEN_SESSION_SECRET=<generated-session-secret>
@@ -191,7 +434,10 @@ HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 
 If this is left as `./humen-mcp-webui/dist`, `https://your-domain.example/mcp/` will return 404 because the service runs from `/var/lib/humen-mcp`.
 
-## Arch deployment
+</details>
+
+<details>
+<summary><strong>Arch Deployment</strong></summary>
 
 Install with an AUR helper as a normal user, not root:
 
@@ -219,12 +465,7 @@ sudo systemctl enable --now humen-mcp.service
 
 The `init-admin` command writes `/etc/humen-mcp.env`, generates a new session secret, and prints the generated admin password. Save that password in your password manager; do not commit it.
 
-Packaged installs include admin-triggered self-update support. The web UI calls
-`POST /api/admin/update`; the service then starts `humen-mcp-self-update.service`
-through a sudoers rule limited to that exact systemctl command. The oneshot unit
-runs the configured AUR helper as the normal AUR user, upgrades
-`humen-mcp-bin` or `humen-mcp-git`, reloads systemd, and restarts
-`humen-mcp.service`.
+Packaged installs include admin-triggered self-update support. The web UI calls `POST /api/admin/update`; the service then starts `humen-mcp-self-update.service` through a sudoers rule limited to that exact systemctl command. The oneshot unit runs the configured AUR helper as the normal AUR user, upgrades `humen-mcp-bin` or `humen-mcp-git`, reloads systemd, and restarts `humen-mcp.service`.
 
 Override updater defaults in `/etc/humen-mcp-update.env` when needed:
 
@@ -234,9 +475,7 @@ HUMEN_UPDATE_HELPER=paru
 HUMEN_UPDATE_PACKAGE=humen-mcp-bin
 ```
 
-Because the updater runs from systemd without a TTY, the AUR user must be able
-to run its package installation step non-interactively, for example with
-`sudo -n true` succeeding for that user.
+Because the updater runs from systemd without a TTY, the AUR user must be able to run its package installation step non-interactively, for example with `sudo -n true` succeeding for that user.
 
 After editing `/etc/humen-mcp.env`:
 
@@ -244,7 +483,10 @@ After editing `/etc/humen-mcp.env`:
 sudo systemctl restart humen-mcp.service
 ```
 
-## Nginx reverse proxy
+</details>
+
+<details>
+<summary><strong>Nginx Reverse Proxy</strong></summary>
 
 Include `packaging/nginx/humen-mcp.conf` in the HTTPS server block for your domain.
 
@@ -265,7 +507,10 @@ curl -fsS https://your-domain.example/mcp/api/auth/config
 
 A working `/mcp/` response should be `HTTP 200` with the web UI HTML.
 
-## Verification checklist
+</details>
+
+<details>
+<summary><strong>Verification Checklist</strong></summary>
 
 After install or upgrade:
 
@@ -287,13 +532,22 @@ Expected:
 - `tools/list` includes `ask_humen`
 - `/mcp/` returns the web UI HTML, not 404
 
-## Release packaging
+</details>
+
+<details>
+<summary><strong>Release Packaging</strong></summary>
 
 Build a binary release tarball:
 
 ```bash
+scripts/package-release.sh
+# or explicitly:
 scripts/package-release.sh <version>
 ```
+
+With no argument, the script reads the version from `Cargo.toml`. If an explicit
+version does not match `Cargo.toml`, packaging fails instead of producing a
+misnamed tarball.
 
 Or publish through GitHub Actions:
 
@@ -302,11 +556,7 @@ git tag v<version>
 git push origin v<version>
 ```
 
-The `Release` workflow can also be run manually from GitHub Actions. Its
-`version` input is optional and defaults to `auto`, which uses the version in
-`Cargo.toml`. The GitHub Release tag is always `v<version>`. It builds the Rust
-binary and web UI, uploads the tarball plus `.sha256` as workflow artifacts, and
-creates or updates that GitHub Release.
+The `Release` workflow can also be run manually from GitHub Actions. Its `version` input is optional and defaults to `auto`, which uses the version in `Cargo.toml`. The GitHub Release tag is always `v<version>`. It builds the Rust binary and web UI, uploads the tarball plus `.sha256` as workflow artifacts, and creates or updates that GitHub Release.
 
 The tarball is written to `dist-release/` and contains:
 
@@ -322,7 +572,10 @@ The tarball is written to `dist-release/` and contains:
 
 For `humen-mcp-bin`, upload the tarball to GitHub Release `v<version>`, then update `aur/humen-mcp-bin/PKGBUILD` and `.SRCINFO` with the new version and sha256.
 
-## Troubleshooting
+</details>
+
+<details>
+<summary><strong>Troubleshooting</strong></summary>
 
 ### `https://domain/mcp/` returns 404
 
@@ -367,3 +620,5 @@ The admin account was not initialized. Run:
 sudo humen-mcp init-admin --email <admin-email>
 sudo systemctl restart humen-mcp.service
 ```
+
+</details>
