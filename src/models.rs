@@ -376,7 +376,7 @@ enum AuthProvider {
     Passkey,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct Session {
     user: User,
     created_at: u64,
@@ -1182,6 +1182,14 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_agent_messages_agent ON agent_human_messages(agent_id, status, created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_messages_human ON agent_human_messages(human_email, status, created_at);
+
+        CREATE TABLE IF NOT EXISTS web_sessions (
+            token_hash TEXT PRIMARY KEY,
+            session_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at);
         "#,
     )
     .context("initialize sqlite schema")?;

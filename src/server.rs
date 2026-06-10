@@ -55,6 +55,7 @@ fn api_router() -> Router<AppState> {
     Router::new()
         .route("/auth/config", get(auth_config))
         .route("/auth/login", post(login))
+        .route("/auth/logout", post(logout))
         .route("/auth/passkey/start", post(passkey_authentication_start))
         .route(
             "/auth/passkey/finish",

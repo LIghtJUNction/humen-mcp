@@ -5,11 +5,12 @@ async fn ws_handler(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, ApiError> {
     let session = if let Some(token) = query.token.as_deref() {
-        let session = state
-            .session_from_token(token)
-            .ok_or_else(|| ApiError::unauthorized("missing or invalid websocket token"))?;
-        ensure_user_allowed(&state, &session.user.email)?;
-        session
+        if let Some(session) = state.session_from_token(token) {
+            ensure_user_allowed(&state, &session.user.email)?;
+            session
+        } else {
+            require_session(&state, &headers)?
+        }
     } else {
         require_session(&state, &headers)?
     };

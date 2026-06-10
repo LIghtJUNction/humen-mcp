@@ -387,7 +387,7 @@ async fn call_tool(
             let args: RateHumanRequest = serde_json::from_value(arguments).map_err(|err| {
                 ApiError::bad_request(format!("invalid rate_humen arguments: {err}"))
             })?;
-            let reputation = rate_human_from_actor(&state, &agent.email, args)?;
+            let reputation = rate_human_from_agent(&state, &agent, args)?;
             Ok(Json(mcp_text_result(id, json!({ "reputation": reputation }))))
         }
         "report_humen" => {
@@ -1014,6 +1014,27 @@ fn resolve_human_for_agent_friend_accept(
     Err(ApiError::unauthorized(
         "target human is not visible to this agent",
     ))
+}
+
+fn rate_human_from_agent(
+    state: &AppState,
+    agent: &AgentContext,
+    payload: RateHumanRequest,
+) -> Result<ReputationSummary, ApiError> {
+    if !payload.score.is_finite() || !(0.0..=10.0).contains(&payload.score) {
+        return Err(ApiError::bad_request("score must be a number from 0 to 10"));
+    }
+    let target = resolve_visible_human_for_agent(state, agent, &payload.rated_email)?;
+    if same_user_identity(state, &agent.email, &target) {
+        return Err(ApiError::bad_request("cannot rate your own human profile"));
+    }
+    db_store_human_rating(
+        state,
+        &target,
+        &format!("agent:{}", agent.agent_id),
+        payload.score,
+        payload.note.as_deref(),
+    )
 }
 
 fn rate_humen_schema() -> Value {

@@ -369,6 +369,27 @@ mod tests {
     }
 
     #[test]
+    fn cookie_session_restores_from_sqlite_and_can_be_deleted() {
+        let state = test_state();
+        let auth = state.create_session("admin-cookie", AuthProvider::Password);
+        state.sessions.clear();
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("theme=light; humen-mcp-token={}; other=1", auth.token)
+                .parse()
+                .unwrap(),
+        );
+        let session = state.session_from_headers(&headers).unwrap();
+        assert_eq!(session.user.email, "admin-cookie");
+
+        state.sessions.clear();
+        state.destroy_session_token(&auth.token);
+        assert!(state.session_from_headers(&headers).is_none());
+    }
+
+    #[test]
     fn online_count_tracks_unique_users_not_connections() {
         let state = test_state();
         let first_tab = begin_active_period(&state, "user-one");
@@ -761,13 +782,14 @@ mod tests {
 
         let public_users = visible(AgentDirectoryVisibility::PublicUsers);
         assert!(public_users.contains(&"alice@example.com".to_string()));
+        assert!(public_users.contains(&"bob@example.com".to_string()));
         assert!(public_users.contains(&"carol@example.com".to_string()));
         assert!(public_users.contains(&"dave@example.com".to_string()));
-        assert!(!public_users.contains(&"bob@example.com".to_string()));
         assert!(!public_users.contains(&"erin@example.com".to_string()));
 
         let reputable = visible(AgentDirectoryVisibility::ReputationAtLeast);
         assert!(reputable.contains(&"alice@example.com".to_string()));
+        assert!(reputable.contains(&"bob@example.com".to_string()));
         assert!(reputable.contains(&"carol@example.com".to_string()));
         assert!(!reputable.contains(&"dave@example.com".to_string()));
         assert!(!reputable.contains(&"erin@example.com".to_string()));
@@ -807,6 +829,61 @@ mod tests {
         assert_eq!(alice_tasks.len(), 1);
         assert_eq!(alice_tasks[0].id, task.id);
         assert!(bob_tasks.is_empty());
+    }
+
+    #[test]
+    fn agents_rate_visible_humans_with_agent_identity() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("alice@example.com", 1, "Alice"));
+            let mut bob = new_user_record("bob@example.com", 1, "Bob");
+            bob.visibility = ProfileVisibility::Public;
+            users.insert(bob);
+        }
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: "agent-alice".to_string(),
+            agent_name: "Alice Agent".to_string(),
+            directory_visibility: AgentDirectoryVisibility::PublicUsers,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+
+        let rated = rate_human_from_agent(
+            &state,
+            &agent,
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 8.0,
+                note: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(rated.ratings_count, 1);
+
+        let repeated = rate_human_from_agent(
+            &state,
+            &agent,
+            RateHumanRequest {
+                rated_email: "bob@example.com".to_string(),
+                score: 9.0,
+                note: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(repeated.status, StatusCode::CONFLICT);
+
+        let own_profile = rate_human_from_agent(
+            &state,
+            &agent,
+            RateHumanRequest {
+                rated_email: "alice@example.com".to_string(),
+                score: 10.0,
+                note: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(own_profile.message, "cannot rate your own human profile");
     }
 
     #[test]
@@ -945,6 +1022,40 @@ mod tests {
 
         let accepted = db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
         assert_eq!(accepted, AgentRelationStatus::Friends);
+    }
+
+    #[test]
+    fn one_owner_keeps_only_one_connected_agent_card() {
+        let state = test_state();
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: String::new(),
+            agent_name: String::new(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+        let payload = McpRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: json!({}),
+        };
+        let mut first_headers = HeaderMap::new();
+        first_headers.insert("x-humen-agent-id", "first-agent".parse().unwrap());
+        first_headers.insert("x-humen-agent-name", "First".parse().unwrap());
+        let first = db_touch_agent_connection(&state, &agent, &first_headers, &payload).unwrap();
+
+        let mut second_headers = HeaderMap::new();
+        second_headers.insert("x-humen-agent-id", "second-agent".parse().unwrap());
+        second_headers.insert("x-humen-agent-name", "Second".parse().unwrap());
+        let second = db_touch_agent_connection(&state, &agent, &second_headers, &payload).unwrap();
+
+        assert_ne!(first.agent_id, second.agent_id);
+        let listed = db_list_connected_agents(&state, "bob@example.com", 20).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, second.agent_id);
+        assert_eq!(listed[0].owner_email, "alice@example.com");
+        assert_eq!(listed[0].name, "Second");
     }
 
     #[test]

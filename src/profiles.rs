@@ -381,11 +381,14 @@ fn agent_can_see_record(
     if record_key == agent.email {
         return true;
     }
+    if !matches!(agent.directory_visibility, AgentDirectoryVisibility::SelfOnly)
+        && friends.iter().any(|friend| friend == &record_key)
+    {
+        return true;
+    }
     match agent.directory_visibility {
         AgentDirectoryVisibility::SelfOnly => false,
-        AgentDirectoryVisibility::SelfAndFriends => {
-            friends.iter().any(|friend| friend == &record_key)
-        }
+        AgentDirectoryVisibility::SelfAndFriends => false,
         AgentDirectoryVisibility::PublicUsers => profile_visible_to_agents(record),
         AgentDirectoryVisibility::ReputationAtLeast => {
             profile_visible_to_agents(record) && reputation >= min_reputation

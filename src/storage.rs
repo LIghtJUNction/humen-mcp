@@ -39,6 +39,72 @@ fn db_insert_request(state: &AppState, request: &HumanRequest) -> Result<(), Api
     Ok(())
 }
 
+fn db_store_web_session(
+    state: &AppState,
+    token_hash: &str,
+    session: &Session,
+    expires_at: u64,
+) -> Result<(), ApiError> {
+    let session_json = serde_json::to_string(session)
+        .map_err(|err| ApiError::internal(format!("serialize session: {err}")))?;
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT OR REPLACE INTO web_sessions (token_hash, session_json, created_at, expires_at) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            token_hash,
+            session_json,
+            session.created_at,
+            expires_at
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist web session: {err}")))?;
+    Ok(())
+}
+
+fn db_get_web_session(state: &AppState, token_hash: &str) -> Result<Option<Session>, ApiError> {
+    let now = now_unix();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "DELETE FROM web_sessions WHERE expires_at <= ?1",
+        params![now],
+    )
+    .map_err(|err| ApiError::internal(format!("prune expired web sessions: {err}")))?;
+    let row = db
+        .query_row(
+            "SELECT session_json FROM web_sessions WHERE token_hash = ?1 AND expires_at > ?2",
+            params![token_hash, now],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| ApiError::internal(format!("read web session: {err}")))?;
+    let Some(session_json) = row else {
+        return Ok(None);
+    };
+    let session = serde_json::from_str(&session_json)
+        .map_err(|err| ApiError::internal(format!("parse web session: {err}")))?;
+    Ok(Some(session))
+}
+
+fn db_delete_web_session(state: &AppState, token_hash: &str) -> Result<(), ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "DELETE FROM web_sessions WHERE token_hash = ?1",
+        params![token_hash],
+    )
+    .map_err(|err| ApiError::internal(format!("delete web session: {err}")))?;
+    Ok(())
+}
+
 fn db_mark_expired(state: &AppState, expired: &ExpiredRequest) -> Result<(), ApiError> {
     let request_json = serde_json::to_string(&expired.request)
         .map_err(|err| ApiError::internal(format!("serialize expired request: {err}")))?;
@@ -776,6 +842,12 @@ fn db_touch_agent_connection(
         .db
         .lock()
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let owner_email = normalize_email(&agent.email);
+    db.execute(
+        "DELETE FROM agent_connections WHERE owner_email = ?1 AND id != ?2",
+        params![owner_email, agent_id],
+    )
+    .map_err(|err| ApiError::internal(format!("prune previous agent connection: {err}")))?;
     db.execute(
         "INSERT INTO agent_connections \
          (id, owner_email, name, description, current_task, last_tool, first_seen_at, last_seen_at, last_request_at, request_count) \
@@ -788,7 +860,7 @@ fn db_touch_agent_connection(
            last_seen_at=excluded.last_seen_at, \
            last_request_at=excluded.last_request_at, \
            request_count=request_count + 1",
-        params![agent_id, normalize_email(&agent.email), name, description, last_tool, now],
+        params![agent_id, owner_email, name, description, last_tool, now],
     )
     .map_err(|err| ApiError::internal(format!("persist agent connection: {err}")))?;
     let mut next = agent.clone();

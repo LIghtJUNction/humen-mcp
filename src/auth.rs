@@ -15,15 +15,23 @@ async fn auth_config(State(state): State<AppState>) -> Json<AuthConfigResponse> 
 async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     if let Some(user) = authenticate_password(&state, &payload.email, &payload.pass)? {
         ensure_user_allowed(&state, &user.email)?;
-        Ok(Json(
-            state.create_session(user.email, AuthProvider::Password),
-        ))
+        let auth = state.create_session(user.email, AuthProvider::Password);
+        Ok(auth_json_response(&state, &auth))
     } else {
         Err(ApiError::unauthorized("invalid email or password"))
     }
+}
+
+async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(token) = session_token_from_headers(&headers) {
+        state.destroy_session_token(token);
+    }
+    let mut response = Json(json!({ "ok": true })).into_response();
+    append_auth_cookie(&mut response, &state, None);
+    response
 }
 
 fn authenticate_password(
@@ -59,7 +67,7 @@ async fn github_oauth_start(State(state): State<AppState>) -> Result<Redirect, A
 async fn github_oauth_callback(
     State(state): State<AppState>,
     Query(query): Query<OAuthCallback>,
-) -> Result<Redirect, ApiError> {
+) -> Result<Response, ApiError> {
     let (client_id, client_secret) = github_oauth_credentials(&state)?;
 
     let oauth_response: Value = state
@@ -126,12 +134,77 @@ async fn github_oauth_callback(
     }
     ensure_user_allowed(&state, &account_key)?;
     let auth = state.create_session(account_key, AuthProvider::Github);
-    let redirect = format!(
-        "{}/?token={}",
-        state.config.public_base_url.trim_end_matches('/'),
-        auth.token
-    );
-    Ok(Redirect::temporary(&redirect))
+    let redirect = format!("{}/", state.config.public_base_url.trim_end_matches('/'));
+    let mut response = Redirect::temporary(&redirect).into_response();
+    append_auth_cookie(&mut response, &state, Some(&auth.token));
+    Ok(response)
+}
+
+const AUTH_COOKIE_NAME: &str = "humen-mcp-token";
+const WEB_SESSION_TTL_SECONDS: u64 = 60 * 60 * 24 * 30;
+
+fn auth_json_response(state: &AppState, auth: &AuthResponse) -> Response {
+    let mut response = Json(auth).into_response();
+    append_auth_cookie(&mut response, state, Some(&auth.token));
+    response
+}
+
+fn append_auth_cookie(response: &mut Response, state: &AppState, token: Option<&str>) {
+    let cookie = auth_cookie_value(state, token);
+    if let Ok(value) = cookie.parse() {
+        response.headers_mut().append(header::SET_COOKIE, value);
+    }
+}
+
+fn auth_cookie_value(state: &AppState, token: Option<&str>) -> String {
+    let path = auth_cookie_path(&state.config.public_base_url);
+    let secure = if state.config.public_base_url.starts_with("https://") {
+        "; Secure"
+    } else {
+        ""
+    };
+    match token {
+        Some(token) => format!(
+            "{AUTH_COOKIE_NAME}={token}; Max-Age={WEB_SESSION_TTL_SECONDS}; Path={path}; HttpOnly; SameSite=Lax{secure}"
+        ),
+        None => format!(
+            "{AUTH_COOKIE_NAME}=; Max-Age=0; Path={path}; HttpOnly; SameSite=Lax{secure}"
+        ),
+    }
+}
+
+fn auth_cookie_path(public_base_url: &str) -> &'static str {
+    let Some(after_scheme) = public_base_url.split_once("://").map(|(_, rest)| rest) else {
+        return "/";
+    };
+    let path = after_scheme
+        .split_once('/')
+        .map(|(_, path)| format!("/{path}"))
+        .unwrap_or_else(|| "/".to_string());
+    if path == "/mcp" || path.starts_with("/mcp/") {
+        "/mcp"
+    } else {
+        "/"
+    }
+}
+
+fn session_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    {
+        return Some(token);
+    }
+    session_cookie_token(headers)
+}
+
+fn session_cookie_token(headers: &HeaderMap) -> Option<&str> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == AUTH_COOKIE_NAME && !value.is_empty()).then_some(value)
+    })
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>, ApiError> {

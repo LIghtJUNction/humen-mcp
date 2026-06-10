@@ -1,0 +1,259 @@
+name: Publish AUR
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  release:
+    types: [published]
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "aur/humen-mcp-git/**"
+      - "packaging/**"
+      - "scripts/package-release.sh"
+      - ".github/workflows/aur.yml"
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "AUR package to publish"
+        required: true
+        default: "both"
+        type: choice
+        options:
+          - both
+          - humen-mcp-bin
+          - humen-mcp-git
+      version:
+        description: "Package version, e.g. 0.1.5, or auto to use Cargo.toml/release tag"
+        required: false
+        default: "auto"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aur-${{ github.event_name }}-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish AUR packages
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+
+    env:
+      AUR_GIT_AUTHOR_NAME: LIghtJUNction
+      AUR_GIT_AUTHOR_EMAIL: LIghtJUNction@users.noreply.github.com
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+
+      - name: Resolve publish plan
+        id: plan
+        shell: bash
+        env:
+          DISPATCH_PACKAGE: ${{ github.event.inputs.package }}
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          cargo_version="$(sed -nE 's/^version = "([^"]+)"/\1/p' Cargo.toml | head -n1)"
+          if [[ -z "${cargo_version}" ]]; then
+            echo "Could not read package version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          publish_bin=false
+          publish_git=false
+          version="${cargo_version}"
+
+          case "${GITHUB_EVENT_NAME}" in
+            workflow_run)
+              publish_bin=true
+              publish_git=true
+              ;;
+            release)
+              publish_bin=true
+              publish_git=true
+              version="${RELEASE_TAG#v}"
+              ;;
+            push)
+              publish_git=true
+              ;;
+            workflow_dispatch)
+              case "${DISPATCH_PACKAGE:-both}" in
+                both)
+                  publish_bin=true
+                  publish_git=true
+                  ;;
+                humen-mcp-bin)
+                  publish_bin=true
+                  ;;
+                humen-mcp-git)
+                  publish_git=true
+                  ;;
+                *)
+                  echo "Unsupported package selection: ${DISPATCH_PACKAGE}" >&2
+                  exit 1
+                  ;;
+              esac
+
+              requested="${DISPATCH_VERSION:-auto}"
+              if [[ -n "${requested}" && "${requested}" != "auto" ]]; then
+                version="${requested#v}"
+              fi
+              ;;
+            *)
+              echo "Unsupported event: ${GITHUB_EVENT_NAME}" >&2
+              exit 1
+              ;;
+          esac
+
+          if [[ -z "${version}" || "${version}" == v* ]]; then
+            echo "Invalid version: ${version}" >&2
+            exit 1
+          fi
+
+          {
+            echo "publish_bin=${publish_bin}"
+            echo "publish_git=${publish_git}"
+            echo "version=${version}"
+          } >> "${GITHUB_OUTPUT}"
+
+          echo "publish_bin=${publish_bin}"
+          echo "publish_git=${publish_git}"
+          echo "version=${version}"
+
+      - name: Prepare humen-mcp-bin package
+        if: steps.plan.outputs.publish_bin == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          asset_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/humen-mcp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          checksum="$(curl -fsSL "${asset_url}" | sha256sum | awk '{print $1}')"
+
+          sed -i -E "s/^pkgver=.*/pkgver=${VERSION}/" aur/humen-mcp-bin/PKGBUILD
+          sed -i -E "s/^pkgrel=.*/pkgrel=1/" aur/humen-mcp-bin/PKGBUILD
+          sed -i -E "s/^sha256sums=\('.*'\)/sha256sums=('${checksum}')/" aur/humen-mcp-bin/PKGBUILD
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -v "${PWD}:/work" \
+            -w /work/aur/humen-mcp-bin \
+            archlinux:base-devel \
+            bash -lc 'makepkg --printsrcinfo > .SRCINFO'
+
+      - name: Prepare humen-mcp-git package
+        if: steps.plan.outputs.publish_git == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          commit_count="$(git rev-list --count HEAD)"
+          short_sha="$(git rev-parse --short HEAD)"
+          git_pkgver="${VERSION}.r${commit_count}.g${short_sha}"
+
+          sed -i -E "s/^pkgver=.*/pkgver=${git_pkgver}/" aur/humen-mcp-git/PKGBUILD
+          sed -i -E "s/printf '[0-9]+\\.[0-9]+\\.[0-9]+\\.r%s\\.g%s'/printf '${VERSION}.r%s.g%s'/" aur/humen-mcp-git/PKGBUILD
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -v "${PWD}:/work" \
+            -w /work/aur/humen-mcp-git \
+            archlinux:base-devel \
+            bash -lc 'makepkg --printsrcinfo > .SRCINFO'
+
+      - name: Prepare AUR SSH
+        if: steps.plan.outputs.publish_bin == 'true' || steps.plan.outputs.publish_git == 'true'
+        shell: bash
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${AUR_SSH_PRIVATE_KEY}" ]]; then
+            echo "Missing GitHub secret AUR_SSH_PRIVATE_KEY." >&2
+            exit 1
+          fi
+
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            HostName aur.archlinux.org
+            User aur
+            IdentityFile ~/.ssh/aur
+            IdentitiesOnly yes
+          EOF
+
+      - name: Publish humen-mcp-bin to AUR
+        if: steps.plan.outputs.publish_bin == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ steps.plan.outputs.version }}
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+
+          git clone ssh://aur@aur.archlinux.org/humen-mcp-bin.git "${workdir}/humen-mcp-bin"
+          cp aur/humen-mcp-bin/PKGBUILD aur/humen-mcp-bin/.SRCINFO aur/humen-mcp-bin/humen-mcp.install "${workdir}/humen-mcp-bin/"
+
+          cd "${workdir}/humen-mcp-bin"
+          git config user.name "${AUR_GIT_AUTHOR_NAME}"
+          git config user.email "${AUR_GIT_AUTHOR_EMAIL}"
+          git add PKGBUILD .SRCINFO humen-mcp.install
+
+          if git diff --cached --quiet; then
+            echo "humen-mcp-bin is already up to date."
+            exit 0
+          fi
+
+          git commit -m "Update humen-mcp-bin to ${VERSION}"
+          git push
+
+      - name: Publish humen-mcp-git to AUR
+        if: steps.plan.outputs.publish_git == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          workdir="$(mktemp -d)"
+          trap 'rm -rf "${workdir}"' EXIT
+
+          git_pkgver="$(sed -nE 's/^pkgver=([^[:space:]]+)/\1/p' aur/humen-mcp-git/PKGBUILD | head -n1)"
+
+          git clone ssh://aur@aur.archlinux.org/humen-mcp-git.git "${workdir}/humen-mcp-git"
+          cp aur/humen-mcp-git/PKGBUILD aur/humen-mcp-git/.SRCINFO aur/humen-mcp-git/humen-mcp.install "${workdir}/humen-mcp-git/"
+
+          cd "${workdir}/humen-mcp-git"
+          git config user.name "${AUR_GIT_AUTHOR_NAME}"
+          git config user.email "${AUR_GIT_AUTHOR_EMAIL}"
+          git add PKGBUILD .SRCINFO humen-mcp.install
+
+          if git diff --cached --quiet; then
+            echo "humen-mcp-git is already up to date."
+            exit 0
+          fi
+
+          git commit -m "Update humen-mcp-git to ${git_pkgver}"
+          git push

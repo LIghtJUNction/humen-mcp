@@ -350,9 +350,11 @@ async fn rate_human(
     headers: HeaderMap,
     Json(payload): Json<RateHumanRequest>,
 ) -> Result<Json<Value>, ApiError> {
-    let session = require_session(&state, &headers)?;
-    let reputation = rate_human_from_actor(&state, &session.user.email, payload)?;
-    Ok(Json(json!({ "ok": true, "reputation": reputation })))
+    let _session = require_session(&state, &headers)?;
+    let _payload = payload;
+    Err(ApiError::bad_request(
+        "humans can rate agents; humans are rated through agent feedback",
+    ))
 }
 
 async fn report_human(
@@ -582,6 +584,7 @@ async fn remove_friend(
     Ok(Json(json!({ "ok": true, "friend": other })))
 }
 
+#[cfg(test)]
 fn rate_human_from_actor(
     state: &AppState,
     actor_email: &str,

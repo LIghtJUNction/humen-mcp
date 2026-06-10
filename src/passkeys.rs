@@ -173,7 +173,7 @@ async fn passkey_authentication_start(
 async fn passkey_authentication_finish(
     State(state): State<AppState>,
     Json(payload): Json<PasskeyAuthenticationFinishRequest>,
-) -> Result<Json<AuthResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     cleanup_expired_passkey_challenges(&state);
     let webauthn = require_webauthn(&state)?;
     let (_, pending) = state
@@ -189,9 +189,8 @@ async fn passkey_authentication_finish(
         .finish_passkey_authentication(&payload.credential, &pending.state)
         .map_err(passkey_api_error)?;
     update_passkey_after_authentication(&state, &pending.email, &auth_result)?;
-    Ok(Json(
-        state.create_session(pending.email, AuthProvider::Passkey),
-    ))
+    let auth = state.create_session(pending.email, AuthProvider::Passkey);
+    Ok(auth_json_response(&state, &auth))
 }
 
 fn require_webauthn(state: &AppState) -> Result<Arc<Webauthn>, ApiError> {

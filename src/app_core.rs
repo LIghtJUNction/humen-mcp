@@ -170,13 +170,19 @@ impl AppState {
             email: email.into(),
             provider,
         };
-        self.sessions.insert(
-            token_hash,
-            Session {
-                user: user.clone(),
-                created_at: now_unix(),
-            },
-        );
+        let session = Session {
+            user: user.clone(),
+            created_at: now_unix(),
+        };
+        self.sessions.insert(token_hash.clone(), session.clone());
+        if let Err(err) = db_store_web_session(
+            self,
+            &token_hash,
+            &session,
+            session.created_at + WEB_SESSION_TTL_SECONDS,
+        ) {
+            warn!(error = %err.message, "failed to persist web session");
+        }
         AuthResponse {
             token: raw_token,
             user,
@@ -184,15 +190,39 @@ impl AppState {
     }
 
     fn session_from_headers(&self, headers: &HeaderMap) -> Option<Session> {
-        let value = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
-        let token = value.strip_prefix("Bearer ")?;
-        self.session_from_token(token)
+        if let Some(session) = headers
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .and_then(|token| self.session_from_token(token))
+        {
+            return Some(session);
+        }
+        session_cookie_token(headers).and_then(|token| self.session_from_token(token))
     }
 
     fn session_from_token(&self, token: &str) -> Option<Session> {
-        self.sessions
-            .get(&self.hash_token(token))
-            .map(|s| s.clone())
+        let token_hash = self.hash_token(token);
+        if let Some(session) = self.sessions.get(&token_hash).map(|s| s.clone()) {
+            return Some(session);
+        }
+        let session = match db_get_web_session(self, &token_hash) {
+            Ok(session) => session,
+            Err(err) => {
+                warn!(error = %err.message, "failed to restore web session");
+                None
+            }
+        }?;
+        self.sessions.insert(token_hash, session.clone());
+        Some(session)
+    }
+
+    fn destroy_session_token(&self, token: &str) {
+        let token_hash = self.hash_token(token);
+        self.sessions.remove(&token_hash);
+        if let Err(err) = db_delete_web_session(self, &token_hash) {
+            warn!(error = %err.message, "failed to delete web session");
+        }
     }
 
     fn hash_token(&self, token: &str) -> String {
