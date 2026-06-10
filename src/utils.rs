@@ -10,10 +10,97 @@ fn online_emails(state: &AppState) -> HashMap<String, usize> {
             .filter(|period| period.disconnected_at.is_none())
             .count();
         if active_count > 0 {
-            counts.insert(normalize_email(&record.email), active_count);
+            let key = online_identity_key(record);
+            *counts.entry(key).or_insert(0) += active_count;
         }
     }
     counts
+}
+
+fn online_identity_key(record: &UserRecord) -> String {
+    if let Some(login) = record
+        .login
+        .as_deref()
+        .and_then(|value| normalize_optional_value(Some(value)))
+    {
+        return format!("github-login:{}", login.to_ascii_lowercase());
+    }
+    canonical_user_key_from_record(record)
+}
+
+fn canonical_user_key_from_record(record: &UserRecord) -> String {
+    if let Some(github_id) = record
+        .github_id
+        .as_deref()
+        .and_then(|value| normalize_optional_value(Some(value)))
+    {
+        return github_identity_key(&github_id);
+    }
+    normalize_email(&record.email)
+}
+
+fn profile_user_key(record: &UserRecord, admin_email: &str) -> String {
+    let email = normalize_email(&record.email);
+    if email == normalize_email(admin_email) {
+        email
+    } else {
+        canonical_user_key_from_record(record)
+    }
+}
+
+fn canonical_user_key_from_email(state: &AppState, email: &str) -> String {
+    let wanted = normalize_email(email);
+    if wanted == normalize_email(&state.config.admin_email) {
+        return wanted;
+    }
+    let Ok(users) = state.users.lock() else {
+        return wanted;
+    };
+    canonical_user_key_from_identifier(&users, &wanted, &state.config.admin_email)
+        .unwrap_or(wanted)
+}
+
+fn canonical_user_key_from_identifier(
+    users: &UserStore,
+    identifier: &str,
+    admin_email: &str,
+) -> Option<String> {
+    let wanted = normalize_email(identifier);
+    if wanted.is_empty() {
+        return None;
+    }
+    if wanted == normalize_email(admin_email) {
+        return Some(wanted);
+    }
+    users
+        .users
+        .get(&wanted)
+        .map(canonical_user_key_from_record)
+        .or_else(|| {
+            users
+                .users
+                .values()
+                .find(|record| {
+                    normalize_email(&record.email) == wanted
+                        || record
+                            .login
+                            .as_deref()
+                            .is_some_and(|login| normalize_email(login) == wanted)
+                })
+                .map(canonical_user_key_from_record)
+        })
+}
+
+fn clear_stale_active_periods(users: &mut UserStore) {
+    let now = now_unix();
+    for record in users.users.values_mut() {
+        for period in &mut record.active_periods {
+            if period.disconnected_at.is_none() {
+                period.disconnected_at = Some(now);
+                period.duration_seconds = Some(now.saturating_sub(period.connected_at));
+            }
+        }
+    }
 }
 
 fn normalize_tags(tags: Vec<String>) -> Vec<String> {

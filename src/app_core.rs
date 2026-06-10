@@ -126,6 +126,7 @@ impl AppState {
         for record in users.users.values_mut() {
             prepare_user_record(record);
         }
+        clear_stale_active_periods(&mut users);
         let admin_settings = users.admin_settings.clone();
         let db = open_db(&config.db_file)?;
         let plugins = load_plugins(config.plugin_dir.trim());

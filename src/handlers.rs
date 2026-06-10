@@ -237,7 +237,7 @@ async fn list_friends(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let session = require_session(&state, &headers)?;
-    let email = normalize_email(&session.user.email);
+    let email = canonical_user_key_from_email(&state, &session.user.email);
     let users = state
         .users
         .lock()
@@ -258,7 +258,7 @@ async fn list_friends(
                 .iter()
                 .any(|requester| normalize_email(requester) == email)
         })
-        .map(|candidate| normalize_email(&candidate.email))
+        .map(canonical_user_key_from_record)
         .collect();
     drop(users);
     let friends = relation_profiles(&state, &friend_emails, &email)?;
@@ -277,7 +277,7 @@ async fn create_friend_request(
     Json(payload): Json<FriendRequestCreate>,
 ) -> Result<Json<Value>, ApiError> {
     let session = require_session(&state, &headers)?;
-    let requester = normalize_email(&session.user.email);
+    let requester = canonical_user_key_from_email(&state, &session.user.email);
     let target = find_friend_target(
         &state,
         payload.email.as_deref(),
@@ -334,12 +334,15 @@ async fn accept_friend_request(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let session = require_session(&state, &headers)?;
-    let current = normalize_email(&session.user.email);
-    let requester = normalize_email(&email);
     let mut users = state
         .users
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    let admin_email = normalize_email(&state.config.admin_email);
+    let current = canonical_user_key_from_identifier(&users, &session.user.email, &admin_email)
+        .unwrap_or_else(|| normalize_email(&session.user.email));
+    let requester = canonical_user_key_from_identifier(&users, &email, &admin_email)
+        .ok_or_else(|| ApiError::bad_request("requester not found"))?;
     if !users.users.contains_key(&requester) {
         return Err(ApiError::bad_request("requester not found"));
     }
@@ -372,12 +375,15 @@ async fn remove_friend(
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
     let session = require_session(&state, &headers)?;
-    let current = normalize_email(&session.user.email);
-    let other = normalize_email(&email);
     let mut users = state
         .users
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    let admin_email = normalize_email(&state.config.admin_email);
+    let current = canonical_user_key_from_identifier(&users, &session.user.email, &admin_email)
+        .unwrap_or_else(|| normalize_email(&session.user.email));
+    let other = canonical_user_key_from_identifier(&users, &email, &admin_email)
+        .unwrap_or_else(|| normalize_email(&email));
     if let Some(record) = users.users.get_mut(&current) {
         remove_email(&mut record.friends, &other);
         remove_email(&mut record.friend_requests, &other);
@@ -397,9 +403,8 @@ fn rate_human_from_actor(
     actor_email: &str,
     payload: RateHumanRequest,
 ) -> Result<ReputationSummary, ApiError> {
-    let actor = normalize_email(actor_email);
-    let target = normalize_email(&payload.rated_email);
-    validate_human_interaction_target(state, &actor, &target)?;
+    let actor = canonical_user_key_from_email(state, actor_email);
+    let target = resolve_human_interaction_target(state, &actor, &payload.rated_email)?;
     if !payload.score.is_finite() || !(0.0..=10.0).contains(&payload.score) {
         return Err(ApiError::bad_request("score must be a number from 0 to 10"));
     }
@@ -417,9 +422,8 @@ fn report_human_from_actor(
     actor_email: &str,
     payload: ReportHumanRequest,
 ) -> Result<HumanReport, ApiError> {
-    let actor = normalize_email(actor_email);
-    let target = normalize_email(&payload.reported_email);
-    validate_human_interaction_target(state, &actor, &target)?;
+    let actor = canonical_user_key_from_email(state, actor_email);
+    let target = resolve_human_interaction_target(state, &actor, &payload.reported_email)?;
     let reason = payload.reason.trim();
     if reason.is_empty() {
         return Err(ApiError::bad_request("report reason is required"));
@@ -433,11 +437,11 @@ fn report_human_from_actor(
     Ok(report)
 }
 
-fn validate_human_interaction_target(
+fn resolve_human_interaction_target(
     state: &AppState,
     actor_email: &str,
     target_email: &str,
-) -> Result<(), ApiError> {
+) -> Result<String, ApiError> {
     let actor = normalize_email(actor_email);
     let target = normalize_email(target_email);
     if target.is_empty() {
@@ -447,14 +451,18 @@ fn validate_human_interaction_target(
         return Err(ApiError::bad_request("cannot rate or report yourself"));
     }
     if target == normalize_email(&state.config.admin_email) {
-        return Ok(());
+        return Ok(target);
     }
     let users = state
         .users
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
-    if users.users.contains_key(&target) {
-        Ok(())
+    let admin_email = normalize_email(&state.config.admin_email);
+    if let Some(target) = canonical_user_key_from_identifier(&users, &target, &admin_email) {
+        if actor == target {
+            return Err(ApiError::bad_request("cannot rate or report yourself"));
+        }
+        Ok(target)
     } else {
         Err(ApiError::bad_request("target human not found"))
     }
@@ -473,7 +481,9 @@ fn relation_profiles(
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
     let viewer_email = normalize_email(viewer_email);
     let admin_email = normalize_email(&state.config.admin_email);
-    let viewer = users.users.get(&viewer_email);
+    let viewer_key = canonical_user_key_from_identifier(&users, &viewer_email, &admin_email)
+        .unwrap_or_else(|| viewer_email.clone());
+    let viewer = users.users.get(&viewer_key);
     let friends = viewer
         .map(|record| normalize_email_list(record.friends.clone()))
         .unwrap_or_default();
@@ -482,13 +492,16 @@ fn relation_profiles(
         .unwrap_or_default();
     let mut profiles = Vec::new();
     for email in emails {
-        if let Some(record) = users.users.get(&normalize_email(email)) {
+        let Some(key) = canonical_user_key_from_identifier(&users, email, &admin_email) else {
+            continue;
+        };
+        if let Some(record) = users.users.get(&key) {
             profiles.push(public_profile_from_record_for_viewer(
                 record,
                 &admin_email,
                 &online,
-                reputation_for(&reputations, &record.email),
-                &viewer_email,
+                reputation_for(&reputations, &profile_user_key(record, &admin_email)),
+                &viewer_key,
                 &friends,
                 &incoming,
             ));
@@ -507,9 +520,10 @@ fn find_friend_target(
         .users
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+    let admin_email = normalize_email(&state.config.admin_email);
     if let Some(email) = email.map(normalize_email).filter(|email| !email.is_empty()) {
-        if users.users.contains_key(&email) {
-            return Ok(email);
+        if let Some(key) = canonical_user_key_from_identifier(&users, &email, &admin_email) {
+            return Ok(key);
         }
     }
     if let Some(intro_code) = intro_code.map(str::trim).filter(|code| !code.is_empty()) {
@@ -518,7 +532,7 @@ fn find_friend_target(
             .values()
             .find(|record| record.intro_code.eq_ignore_ascii_case(intro_code))
         {
-            return Ok(normalize_email(&record.email));
+            return Ok(canonical_user_key_from_record(record));
         }
     }
     Err(ApiError::bad_request("target user not found"))

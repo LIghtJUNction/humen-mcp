@@ -85,10 +85,18 @@ fn upsert_github_user(
     email: &str,
 ) -> Result<String, ApiError> {
     validate_email_like_identifier(email)?;
-    let account_key = github_identity_key(github_id);
     let login = login.and_then(|value| normalize_optional_value(Some(value)));
     let legacy_email_key = normalize_email(email);
     let legacy_login_key = login.as_deref().map(normalize_email);
+    let admin_email = normalize_email(&state.config.admin_email);
+    let github_account_key = github_identity_key(github_id);
+    let account_key = if legacy_email_key == admin_email
+        || legacy_login_key.as_deref() == Some(admin_email.as_str())
+    {
+        admin_email.clone()
+    } else {
+        github_account_key.clone()
+    };
     let mut users = state
         .users
         .lock()
@@ -96,6 +104,8 @@ fn upsert_github_user(
     let now = now_unix();
     let existing_key = if users.users.contains_key(&account_key) {
         Some(account_key.clone())
+    } else if users.users.contains_key(&github_account_key) {
+        Some(github_account_key.clone())
     } else if users.users.contains_key(&legacy_email_key) {
         Some(legacy_email_key)
     } else {
@@ -169,7 +179,7 @@ fn user_profiles(
                 record,
                 &admin_email,
                 &online,
-                reputation_for(&reputations, &record.email),
+                reputation_for(&reputations, &profile_user_key(record, &admin_email)),
             )
         })
         .filter(|profile| profile_matches(profile, query.as_deref(), tag.as_deref()))
@@ -187,6 +197,7 @@ fn user_profiles(
         }
     }
 
+    let mut profiles = dedupe_profiles_by_identity(profiles);
     sort_profiles_by_reputation(&mut profiles);
     Ok(profiles)
 }
@@ -213,35 +224,38 @@ fn visible_user_profiles_for_session(
         .map(|value| value.to_ascii_lowercase());
     let tag = tag.and_then(normalize_tag);
     let admin_email = normalize_email(&state.config.admin_email);
-    let viewer = users.users.get(&viewer_email);
+    let viewer_key = canonical_user_key_from_identifier(&users, &viewer_email, &admin_email)
+        .unwrap_or_else(|| viewer_email.clone());
+    let viewer = users.users.get(&viewer_key);
     let friends = viewer
         .map(|record| normalize_email_list(record.friends.clone()))
         .unwrap_or_default();
     let incoming = viewer
         .map(|record| normalize_email_list(record.friend_requests.clone()))
         .unwrap_or_default();
-    let mut profiles: Vec<_> = users
+    let profiles: Vec<_> = users
         .users
         .values()
         .filter(|record| {
-            let email = normalize_email(&record.email);
-            email == viewer_email
+            let record_key = profile_user_key(record, &admin_email);
+            record_key == viewer_key
                 || record.visibility == ProfileVisibility::Public
-                || friends.iter().any(|friend| friend == &email)
+                || friends.iter().any(|friend| friend == &record_key)
         })
         .map(|record| {
             public_profile_from_record_for_viewer(
                 record,
                 &admin_email,
                 &online,
-                reputation_for(&reputations, &record.email),
-                &viewer_email,
+                reputation_for(&reputations, &profile_user_key(record, &admin_email)),
+                &viewer_key,
                 &friends,
                 &incoming,
             )
         })
         .filter(|profile| profile_matches(profile, query.as_deref(), tag.as_deref()))
         .collect();
+    let mut profiles = dedupe_profiles_by_identity(profiles);
     sort_profiles_by_reputation(&mut profiles);
     Ok(profiles)
 }
@@ -264,12 +278,14 @@ fn agent_visible_profiles(
         .map(|value| value.to_ascii_lowercase());
     let tag = tag.and_then(normalize_tag);
     let admin_email = normalize_email(&state.config.admin_email);
-    let viewer = users.users.get(&agent.email);
+    let agent_key = canonical_user_key_from_identifier(&users, &agent.email, &admin_email)
+        .unwrap_or_else(|| normalize_email(&agent.email));
+    let viewer = users.users.get(&agent_key);
     let friends = viewer
         .map(|record| normalize_email_list(record.friends.clone()))
         .unwrap_or_default();
     let min_reputation = agent.directory_min_reputation;
-    let mut profiles: Vec<_> = users
+    let profiles: Vec<_> = users
         .users
         .values()
         .filter(|record| {
@@ -277,7 +293,7 @@ fn agent_visible_profiles(
                 agent,
                 record,
                 &friends,
-                reputation_for(&reputations, &record.email).reputation,
+                reputation_for(&reputations, &profile_user_key(record, &admin_email)).reputation,
                 min_reputation,
             )
         })
@@ -286,11 +302,12 @@ fn agent_visible_profiles(
                 record,
                 &admin_email,
                 &online,
-                reputation_for(&reputations, &record.email),
+                reputation_for(&reputations, &profile_user_key(record, &admin_email)),
             )
         })
         .filter(|profile| profile_matches(profile, query.as_deref(), tag.as_deref()))
         .collect();
+    let mut profiles = dedupe_profiles_by_identity(profiles);
     sort_profiles_by_reputation(&mut profiles);
     Ok(profiles)
 }
@@ -309,6 +326,39 @@ fn sort_profiles_by_reputation(profiles: &mut [PublicUserProfile]) {
             .then_with(|| right.ratings_count.cmp(&left.ratings_count))
             .then_with(|| left.email.cmp(&right.email))
     });
+}
+
+fn dedupe_profiles_by_identity(profiles: Vec<PublicUserProfile>) -> Vec<PublicUserProfile> {
+    let mut by_identity: HashMap<String, PublicUserProfile> = HashMap::new();
+    for profile in profiles {
+        let key = profile_identity_key(&profile);
+        match by_identity.get(&key) {
+            Some(current) if profile_rank(current) >= profile_rank(&profile) => {}
+            _ => {
+                by_identity.insert(key, profile);
+            }
+        }
+    }
+    by_identity.into_values().collect()
+}
+
+fn profile_identity_key(profile: &PublicUserProfile) -> String {
+    if let Some(login) = profile
+        .login
+        .as_deref()
+        .and_then(|value| normalize_optional_value(Some(value)))
+    {
+        return format!("github-login:{}", login.to_ascii_lowercase());
+    }
+    normalize_email(&profile.email)
+}
+
+fn profile_rank(profile: &PublicUserProfile) -> (u8, u8, u64) {
+    (
+        u8::from(profile.email.starts_with("github:")),
+        u8::from(profile.online),
+        profile.last_login_at,
+    )
 }
 
 fn agent_can_see_record(
@@ -422,7 +472,8 @@ fn ensure_user_agent_fields(
 fn public_profile_from_record(state: &AppState, record: &UserRecord) -> PublicUserProfile {
     let online = online_emails(state);
     let admin_email = normalize_email(&state.config.admin_email);
-    let reputation = db_reputation_summary_for(state, &record.email).unwrap_or_default();
+    let reputation =
+        db_reputation_summary_for(state, &profile_user_key(record, &admin_email)).unwrap_or_default();
     public_profile_from_record_with_online_and_reputation(
         record,
         &admin_email,
@@ -439,13 +490,14 @@ fn public_profile_from_record_with_online_and_reputation(
 ) -> PublicUserProfile {
     let email = normalize_email(&record.email);
     let is_admin = email == admin_email;
+    let account_key = profile_user_key(record, admin_email);
     let provider = if is_admin {
         AuthProvider::Password
     } else {
         AuthProvider::Github
     };
     PublicUserProfile {
-        email: record.email.clone(),
+        email: account_key.clone(),
         login: record.login.clone(),
         provider,
         profile: record.profile.clone(),
@@ -461,7 +513,7 @@ fn public_profile_from_record_with_online_and_reputation(
         friend_request_sent: false,
         friend_request_received: false,
         onboarding_completed: record.onboarding_completed,
-        online: online.contains_key(&email),
+        online: online.contains_key(&online_identity_key(record)),
         last_login_at: record.last_login_at,
         ban_expires_at: if is_admin {
             None

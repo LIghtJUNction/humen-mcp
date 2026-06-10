@@ -3,9 +3,13 @@ mod tests {
     use super::*;
 
     fn test_state() -> AppState {
+        test_state_with_public_base_url("http://127.0.0.1:8787")
+    }
+
+    fn test_state_with_public_base_url(public_base_url: &str) -> AppState {
         AppState::new(Config {
             bind: "127.0.0.1:0".parse().unwrap(),
-            public_base_url: "http://127.0.0.1:8787".to_string(),
+            public_base_url: public_base_url.to_string(),
             web_dist: "./humen-mcp-webui/dist".to_string(),
             users_file: std::env::temp_dir()
                 .join(format!("humen-mcp-test-{}.json", Uuid::new_v4())),
@@ -228,6 +232,31 @@ mod tests {
     }
 
     #[test]
+    fn passkey_start_response_uses_public_key_wrapped_options() {
+        let state = test_state_with_public_base_url("http://localhost:8787");
+        let (email, user_id, display_name, exclude_credentials) =
+            ensure_passkey_registration_user(&state, "alice@example.com").unwrap();
+        let webauthn = require_webauthn(&state).unwrap();
+        let (options, _) = webauthn
+            .start_passkey_registration(
+                user_id,
+                &email,
+                &display_name,
+                (!exclude_credentials.is_empty()).then_some(exclude_credentials),
+            )
+            .unwrap();
+        let raw = serde_json::to_value(PasskeyRegistrationStartResponse {
+            registration_id: Uuid::new_v4(),
+            options,
+        })
+        .unwrap();
+
+        assert!(raw["options"]["publicKey"]["challenge"].as_str().is_some());
+        assert!(raw["options"]["challenge"].as_str().is_none());
+        assert!(raw["options"]["publicKey"]["user"]["id"].as_str().is_some());
+    }
+
+    #[test]
     fn judgment_requests_use_fixed_yes_no_choices() {
         assert_eq!(
             normalize_request_choices(
@@ -347,6 +376,55 @@ mod tests {
 
         end_active_period(&state, "user-two", other_user);
         assert_eq!(online_user_count(&state), 0);
+    }
+
+    #[test]
+    fn online_count_dedupes_migrated_github_identity() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            let mut email_record = new_user_record("alice@example.com", now_unix(), "");
+            email_record.login = Some("alice".to_string());
+            email_record.active_periods.push(ActivePeriod {
+                user_id: "alice@example.com".to_string(),
+                connected_at: now_unix(),
+                disconnected_at: None,
+                duration_seconds: None,
+            });
+            users.users.insert("alice@example.com".to_string(), email_record);
+
+            let mut github_record = new_user_record("alice@example.com", now_unix(), "");
+            github_record.github_id = Some("42".to_string());
+            github_record.login = Some("alice".to_string());
+            github_record.active_periods.push(ActivePeriod {
+                user_id: "github:42".to_string(),
+                connected_at: now_unix(),
+                disconnected_at: None,
+                duration_seconds: None,
+            });
+            users.users.insert("github:42".to_string(), github_record);
+        }
+
+        assert_eq!(online_user_count(&state), 1);
+    }
+
+    #[test]
+    fn stale_active_periods_are_closed_on_startup() {
+        let mut users = UserStore::default();
+        let mut record = new_user_record("stale@example.com", 1, "");
+        record.active_periods.push(ActivePeriod {
+            user_id: "stale@example.com".to_string(),
+            connected_at: 1,
+            disconnected_at: None,
+            duration_seconds: None,
+        });
+        users.users.insert("stale@example.com".to_string(), record);
+
+        clear_stale_active_periods(&mut users);
+
+        let record = users.users.get("stale@example.com").unwrap();
+        assert!(record.active_periods[0].disconnected_at.is_some());
+        assert!(record.active_periods[0].duration_seconds.is_some());
     }
 
     #[test]
@@ -842,6 +920,50 @@ mod tests {
         .unwrap();
         assert_eq!(updated.ratings_count, 1);
         assert_eq!(updated.reputation, 9.0);
+    }
+
+    #[test]
+    fn ratings_resolve_github_profiles_to_stable_identity() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("rater@example.com", 1, "Rater"));
+            users.save(&state.config.users_file).unwrap();
+        }
+        let account_key =
+            upsert_github_user(&state, "42", Some("octo-human"), "public@example.com").unwrap();
+        assert_eq!(account_key, "github:42");
+
+        let profiles = user_profiles(&state, None, None).unwrap();
+        let github_profile = profiles
+            .iter()
+            .find(|profile| profile.login.as_deref() == Some("octo-human"))
+            .unwrap();
+        assert_eq!(github_profile.email, "github:42");
+
+        let rated = rate_human_from_actor(
+            &state,
+            "rater@example.com",
+            RateHumanRequest {
+                rated_email: "public@example.com".to_string(),
+                score: 8.0,
+                note: None,
+            },
+        )
+        .unwrap();
+        assert_eq!(rated.ratings_count, 1);
+        assert_eq!(
+            db_reputation_summary_for(&state, "github:42")
+                .unwrap()
+                .reputation,
+            8.0
+        );
+        assert_eq!(
+            db_reputation_summary_for(&state, "public@example.com")
+                .unwrap()
+                .ratings_count,
+            0
+        );
     }
 
     #[test]
