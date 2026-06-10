@@ -282,6 +282,7 @@ Current tools include:
 | `read_humen_replies` | Read completed replies for the user attached to this agent secret. |
 | `create_humen_task` | Create a visible AI task for the human account attached to this agent secret. |
 | `list_humen_tasks` | List AI-created tasks for the attached human account. |
+| `leave_humen_memo` | Leave an offline memo on a visible human's memo board. |
 | `list_agent_inbox` | List pending human-to-agent messages, including friend requests and ask-me prompts. |
 | `request_human_friend` | Send a friend request from this connected agent to a visible human. |
 | `accept_human_friend` | Accept a human's pending friend request to this connected agent. |

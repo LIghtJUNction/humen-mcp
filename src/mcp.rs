@@ -103,6 +103,11 @@ async fn mcp(
                     "inputSchema": list_humen_tasks_schema()
                 },
                 {
+                    "name": "leave_humen_memo",
+                    "description": "Leave an offline memo on a visible human's memo board.",
+                    "inputSchema": leave_humen_memo_schema()
+                },
+                {
                     "name": "list_agent_inbox",
                     "description": "List pending human-to-agent messages, including friend requests and requests asking this agent to ask that human.",
                     "inputSchema": list_agent_inbox_schema()
@@ -268,6 +273,29 @@ async fn call_tool(
                 200,
             )?;
             Ok(Json(mcp_text_result(id, json!({ "tasks": tasks }))))
+        }
+        "leave_humen_memo" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: LeaveHumanMemoArgs = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid leave_humen_memo arguments: {err}"))
+            })?;
+            let target = resolve_visible_human_for_agent(&state, &agent, &args.target_human_email)?;
+            let memo = db_create_human_memo_with_agent(
+                &state,
+                &target,
+                &agent.email,
+                Some(&agent.agent_id),
+                Some(&agent.agent_name),
+                &args.body,
+            )?;
+            Ok(Json(mcp_text_result(
+                id,
+                json!({ "memo": memo, "target_human_email": target }),
+            )))
         }
         "list_agent_inbox" => {
             let arguments = payload
@@ -915,6 +943,23 @@ fn request_human_friend_schema() -> Value {
         "properties": {
             "human_email": { "type": "string" },
             "message": { "type": "string" }
+        }
+    })
+}
+
+fn leave_humen_memo_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["target_human_email", "body"],
+        "properties": {
+            "target_human_email": {
+                "type": "string",
+                "description": "Visible human profile email/key."
+            },
+            "body": {
+                "type": "string",
+                "description": "Offline memo or short-term context."
+            }
         }
     })
 }

@@ -631,6 +631,17 @@ fn db_create_human_memo(
     author_email: &str,
     body: &str,
 ) -> Result<HumanMemo, ApiError> {
+    db_create_human_memo_with_agent(state, target_email, author_email, None, None, body)
+}
+
+fn db_create_human_memo_with_agent(
+    state: &AppState,
+    target_email: &str,
+    author_email: &str,
+    author_agent_id: Option<&str>,
+    author_agent_name: Option<&str>,
+    body: &str,
+) -> Result<HumanMemo, ApiError> {
     let body = body.trim();
     if body.is_empty() {
         return Err(ApiError::bad_request("memo body is required"));
@@ -642,6 +653,8 @@ fn db_create_human_memo(
         id: Uuid::new_v4(),
         target_email: normalize_email(target_email),
         author_email: normalize_email(author_email),
+        author_agent_id: author_agent_id.and_then(|value| normalize_optional_value(Some(value))),
+        author_agent_name: author_agent_name.and_then(|value| normalize_optional_value(Some(value))),
         body: body.to_string(),
         created_at: now_unix(),
         read_at: None,
@@ -651,12 +664,15 @@ fn db_create_human_memo(
         .lock()
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
     db.execute(
-        "INSERT INTO human_memos (id, target_email, author_email, body, created_at, read_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO human_memos \
+         (id, target_email, author_email, author_agent_id, author_agent_name, body, created_at, read_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             memo.id.to_string(),
             memo.target_email,
             memo.author_email,
+            memo.author_agent_id,
+            memo.author_agent_name,
             memo.body,
             memo.created_at,
             memo.read_at
@@ -678,7 +694,7 @@ fn db_list_human_memos(
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
     let mut stmt = db
         .prepare(
-            "SELECT id, target_email, author_email, body, created_at, read_at \
+            "SELECT id, target_email, author_email, author_agent_id, author_agent_name, body, created_at, read_at \
              FROM human_memos \
              WHERE target_email = ?1 \
              ORDER BY created_at DESC \
@@ -691,15 +707,17 @@ fn db_list_human_memos(
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, u64>(4)?,
-                row.get::<_, Option<u64>>(5)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, u64>(6)?,
+                row.get::<_, Option<u64>>(7)?,
             ))
         })
         .map_err(|err| ApiError::internal(format!("query human memos: {err}")))?;
     let mut memos = Vec::new();
     for row in rows {
-        let (id, target_email, author_email, body, created_at, read_at) =
+        let (id, target_email, author_email, author_agent_id, author_agent_name, body, created_at, read_at) =
             row.map_err(|err| ApiError::internal(format!("read human memo: {err}")))?;
         let id = Uuid::parse_str(&id)
             .map_err(|err| ApiError::internal(format!("parse human memo id: {err}")))?;
@@ -707,6 +725,8 @@ fn db_list_human_memos(
             id,
             target_email,
             author_email,
+            author_agent_id,
+            author_agent_name,
             body,
             created_at,
             read_at,

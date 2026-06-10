@@ -228,6 +228,10 @@ struct HumanMemo {
     id: Uuid,
     target_email: String,
     author_email: String,
+    #[serde(default)]
+    author_agent_id: Option<String>,
+    #[serde(default)]
+    author_agent_name: Option<String>,
     body: String,
     created_at: u64,
     read_at: Option<u64>,
@@ -815,6 +819,13 @@ struct CreateHumanMemo {
 }
 
 #[derive(Debug, Deserialize)]
+struct LeaveHumanMemoArgs {
+    #[serde(alias = "email", alias = "human_email")]
+    target_human_email: String,
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AgentPanelMessageCreate {
     #[serde(default)]
     body: String,
@@ -1121,6 +1132,8 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
             id TEXT PRIMARY KEY,
             target_email TEXT NOT NULL,
             author_email TEXT NOT NULL,
+            author_agent_id TEXT,
+            author_agent_name TEXT,
             body TEXT NOT NULL,
             created_at INTEGER NOT NULL,
             read_at INTEGER
@@ -1187,6 +1200,14 @@ fn migrate_reputation_schema(conn: &Connection) -> anyhow::Result<()> {
     if !sqlite_table_has_column(conn, "human_memos", "read_at")? {
         conn.execute("ALTER TABLE human_memos ADD COLUMN read_at INTEGER", [])
             .context("add human_memos.read_at column")?;
+    }
+    if !sqlite_table_has_column(conn, "human_memos", "author_agent_id")? {
+        conn.execute("ALTER TABLE human_memos ADD COLUMN author_agent_id TEXT", [])
+            .context("add human_memos.author_agent_id column")?;
+    }
+    if !sqlite_table_has_column(conn, "human_memos", "author_agent_name")? {
+        conn.execute("ALTER TABLE human_memos ADD COLUMN author_agent_name TEXT", [])
+            .context("add human_memos.author_agent_name column")?;
     }
     if !sqlite_table_has_column(conn, "agent_human_messages", "read_at")? {
         conn.execute("ALTER TABLE agent_human_messages ADD COLUMN read_at INTEGER", [])

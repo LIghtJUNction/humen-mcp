@@ -169,6 +169,7 @@ mod tests {
         assert!(tool_names.contains(&"feedback"));
         assert!(tool_names.contains(&"list_humen_plugins"));
         assert!(tool_names.contains(&"create_humen_request_from_template"));
+        assert!(tool_names.contains(&"leave_humen_memo"));
     }
 
     #[test]
@@ -1236,6 +1237,19 @@ mod tests {
         );
         let memos = db_list_human_memos(&state, "bob@example.com", 10).unwrap();
         assert!(memos[0].read_at.is_some());
+
+        let agent_memo = db_create_human_memo_with_agent(
+            &state,
+            "bob@example.com",
+            "alice@example.com",
+            Some("agent-alice"),
+            Some("Alice Agent"),
+            "Agent follow-up.",
+        )
+        .unwrap();
+        assert_eq!(agent_memo.author_agent_id.as_deref(), Some("agent-alice"));
+        let memos = db_list_human_memos(&state, "bob@example.com", 10).unwrap();
+        assert_eq!(memos[0].author_agent_name.as_deref(), Some("Alice Agent"));
 
         let hidden =
             resolve_visible_human_memo_target(&state, "alice@example.com", "dave@example.com")

@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 19,
+  "method": "tools/call",
+  "params": {
+    "name": "leave_humen_memo",
+    "arguments": {
+      "target_human_email": "github:139631158",
+      "body": "Offline context from the agent. Please review when you are available."
+    }
+  }
+}

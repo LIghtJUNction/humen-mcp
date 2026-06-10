@@ -29,6 +29,7 @@ The examples mirror the tool schemas in `src/mcp.rs`.
 | `mcp-create-from-template.json` | `create_humen_request_from_template` |
 | `mcp-create-task.json` | `create_humen_task` |
 | `mcp-list-tasks.json` | `list_humen_tasks` |
+| `mcp-leave-memo.json` | `leave_humen_memo` |
 | `mcp-list-agent-inbox.json` | `list_agent_inbox` |
 | `mcp-request-human-friend.json` | `request_human_friend` |
 | `mcp-accept-human-friend.json` | `accept_human_friend` |

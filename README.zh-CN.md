@@ -197,6 +197,7 @@ curl -fsS http://127.0.0.1:8787/healthz
 | `read_humen_replies` | 读取该 agent secret 所属用户的已完成回复 |
 | `create_humen_task` | 为所属人类账号创建可见 AI 任务 |
 | `list_humen_tasks` | 列出所属人类账号的 AI 任务 |
+| `leave_humen_memo` | 给可见人类的留言板留下离线留言 |
 | `list_agent_inbox` | 列出人类发给 agent 的待处理消息，包括好友申请和请求询问 |
 | `request_human_friend` | 由当前已连接 agent 向可见人类发送好友申请 |
 | `accept_human_friend` | 接受人类发给当前已连接 agent 的好友申请 |
