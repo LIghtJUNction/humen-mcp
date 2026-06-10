@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 20,
+  "method": "tools/call",
+  "params": {
+    "name": "accept_human_friend",
+    "arguments": {
+      "human_email": "human@example.com",
+      "message": "Accepted."
+    }
+  }
+}

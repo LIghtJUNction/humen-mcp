@@ -105,7 +105,7 @@ async fn mcp(
                 {
                     "name": "list_agent_inbox",
                     "description": "List pending human-to-agent messages, including friend requests and requests asking this agent to ask that human.",
-                    "inputSchema": json!({ "type": "object", "properties": {} })
+                    "inputSchema": list_agent_inbox_schema()
                 },
                 {
                     "name": "request_human_friend",
@@ -269,10 +269,26 @@ async fn call_tool(
             )?;
             Ok(Json(mcp_text_result(id, json!({ "tasks": tasks }))))
         }
-        "list_agent_inbox" => Ok(Json(mcp_text_result(
-            id,
-            json!({ "messages": db_list_agent_inbox(&state, &agent.agent_id, 100)? }),
-        ))),
+        "list_agent_inbox" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: ListAgentInboxArgs = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid list_agent_inbox arguments: {err}"))
+            })?;
+            Ok(Json(mcp_text_result(
+                id,
+                json!({ "messages": db_list_agent_inbox(
+                    &state,
+                    &agent.agent_id,
+                    args.unread_only,
+                    args.mark_read,
+                    args.limit.unwrap_or(100)
+                )? }),
+            )))
+        }
         "request_human_friend" => {
             let arguments = payload
                 .params
@@ -426,6 +442,8 @@ async fn create_humen_request(
     let tags = extract_tags(&tag_sources);
     let (image_base64, image_mime_type) =
         normalize_image_payload(create.image_base64, create.image_mime_type);
+    let assigned_to =
+        resolve_request_target_human(&state, &agent, create.target_human_email.as_deref())?;
     let request = HumanRequest {
         id: Uuid::new_v4(),
         kind: create.kind,
@@ -440,7 +458,9 @@ async fn create_humen_request(
         timeout_seconds,
         expires_at: now.saturating_add(timeout_seconds),
         tags,
-        assigned_to: Some(agent.email.clone()),
+        assigned_to: Some(assigned_to),
+        created_by: Some(agent.email.clone()),
+        created_by_agent_id: normalize_optional_value(Some(agent.agent_id.as_str())),
     };
     let current_task = format!("{}: {}", request.title, request.prompt);
     db_update_agent_current_task(&state, &agent, &current_task)?;
@@ -645,6 +665,10 @@ fn human_shortcut_schema(prompt_description: &'static str) -> Value {
                 "minimum": 30,
                 "maximum": 86400,
                 "default": 60
+            },
+            "target_human_email": {
+                "type": "string",
+                "description": "Optional visible human profile email/key to ask. Omit to ask the human attached to this agent secret."
             }
         }
     })
@@ -686,6 +710,10 @@ fn ask_humen_schema() -> Value {
                 "maximum": 86400,
                 "default": 60
             },
+            "target_human_email": {
+                "type": "string",
+                "description": "Optional visible human profile email/key to ask. Omit to ask the human attached to this agent secret."
+            },
             "background": {
                 "type": "boolean",
                 "default": false,
@@ -721,6 +749,10 @@ fn ask_humen_text_async_schema() -> Value {
                 "minimum": 30,
                 "maximum": 86400,
                 "default": 60
+            },
+            "target_human_email": {
+                "type": "string",
+                "description": "Optional visible human profile email/key to ask. Omit to ask the human attached to this agent secret."
             }
         }
     })
@@ -747,6 +779,10 @@ fn ask_humen_choice_async_schema() -> Value {
                 "minimum": 30,
                 "maximum": 86400,
                 "default": 60
+            },
+            "target_human_email": {
+                "type": "string",
+                "description": "Optional visible human profile email/key to ask. Omit to ask the human attached to this agent secret."
             }
         }
     })
@@ -768,6 +804,10 @@ fn ask_humen_judgment_async_schema() -> Value {
                 "minimum": 30,
                 "maximum": 86400,
                 "default": 60
+            },
+            "target_human_email": {
+                "type": "string",
+                "description": "Optional visible human profile email/key to ask. Omit to ask the human attached to this agent secret."
             }
         }
     })
@@ -798,6 +838,28 @@ fn read_humen_replies_schema() -> Value {
                 "minimum": 1,
                 "maximum": 200,
                 "default": 50
+            }
+        }
+    })
+}
+
+fn list_agent_inbox_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "unread_only": {
+                "type": "boolean",
+                "default": false
+            },
+            "mark_read": {
+                "type": "boolean",
+                "default": false
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 100
             }
         }
     })
@@ -855,6 +917,18 @@ fn request_human_friend_schema() -> Value {
             "message": { "type": "string" }
         }
     })
+}
+
+fn resolve_request_target_human(
+    state: &AppState,
+    agent: &AgentContext,
+    target_human_email: Option<&str>,
+) -> Result<String, ApiError> {
+    let Some(target) = target_human_email.and_then(|value| normalize_optional_value(Some(value)))
+    else {
+        return Ok(agent.email.clone());
+    };
+    resolve_visible_human_for_agent(state, agent, &target)
 }
 
 fn resolve_visible_human_for_agent(

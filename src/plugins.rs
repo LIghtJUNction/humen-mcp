@@ -176,6 +176,7 @@ fn create_request_from_template_args(
             .collect(),
         timeout_seconds: args.timeout_seconds.or(template.timeout_seconds).unwrap_or_else(default_timeout),
         background: args.background,
+        target_human_email: None,
     })
 }
 

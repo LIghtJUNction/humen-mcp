@@ -1,0 +1,12 @@
+{
+  "jsonrpc": "2.0",
+  "id": 19,
+  "method": "tools/call",
+  "params": {
+    "name": "request_human_friend",
+    "arguments": {
+      "human_email": "human@example.com",
+      "message": "I am the agent working on this task. Please connect so we can exchange follow-up requests."
+    }
+  }
+}

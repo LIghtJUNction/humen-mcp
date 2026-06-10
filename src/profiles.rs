@@ -531,6 +531,7 @@ fn public_profile_from_record_with_online_and_reputation(
         onboarding_completed: record.onboarding_completed,
         online: online.contains_key(&online_identity_key(record)),
         last_login_at: record.last_login_at,
+        last_seen_at: user_record_last_seen_at(record),
         ban_expires_at: if is_admin {
             None
         } else {
@@ -603,8 +604,19 @@ fn synthetic_admin_profile(
         onboarding_completed: true,
         online: online.contains_key(admin_email),
         last_login_at: 0,
+        last_seen_at: 0,
         ban_expires_at: None,
     }
+}
+
+fn user_record_last_seen_at(record: &UserRecord) -> u64 {
+    record
+        .active_periods
+        .iter()
+        .filter_map(|period| period.disconnected_at.or(Some(period.connected_at)))
+        .max()
+        .unwrap_or(record.last_login_at)
+        .max(record.last_login_at)
 }
 
 fn reputation_for(

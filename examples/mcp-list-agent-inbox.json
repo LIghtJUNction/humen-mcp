@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": 18,
+  "method": "tools/call",
+  "params": {
+    "name": "list_agent_inbox",
+    "arguments": {
+      "unread_only": true,
+      "mark_read": true,
+      "limit": 50
+    }
+  }
+}

@@ -371,7 +371,9 @@ fn db_read_humen_replies(
             row.map_err(|err| ApiError::internal(format!("read late reply: {err}")))?;
         let request: HumanRequest = serde_json::from_str(&request_json)
             .map_err(|err| ApiError::internal(format!("parse late request: {err}")))?;
-        if !can_access_request(state, agent_email, &request) {
+        if !can_access_request(state, agent_email, &request)
+            && !agent_created_request(state, agent_email, &request)
+        {
             continue;
         }
         let answer: HumanAnswer = serde_json::from_str(&answer_json)
@@ -396,6 +398,13 @@ fn db_read_humen_replies(
         }
     }
     Ok(replies)
+}
+
+fn agent_created_request(state: &AppState, agent_email: &str, request: &HumanRequest) -> bool {
+    request
+        .created_by
+        .as_deref()
+        .is_some_and(|created_by| same_user_identity(state, created_by, agent_email))
 }
 
 fn db_store_agent_task(state: &AppState, task: &AgentTask) -> Result<(), ApiError> {
@@ -508,15 +517,70 @@ fn db_store_human_rating(
     let rater_reputation = reputation_summary_from_db(&db, &rater_email)?;
     let weight = reputation_feedback_weight(&rater_reputation);
     db.execute(
-        "INSERT INTO human_ratings \
+        "INSERT OR IGNORE INTO human_ratings \
          (rated_email, rater_email, score, weight, note, created_at, updated_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
-         ON CONFLICT(rated_email, rater_email) DO UPDATE SET \
-           score=excluded.score, weight=excluded.weight, note=excluded.note, updated_at=excluded.updated_at",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![rated_email, rater_email, score, weight, note, now],
     )
-    .map_err(|err| ApiError::internal(format!("persist human rating: {err}")))?;
+    .map_err(|err| ApiError::internal(format!("persist human rating: {err}")))
+    .and_then(|changed| {
+        if changed == 0 {
+            Err(ApiError::conflict("you have already rated this human"))
+        } else {
+            Ok(())
+        }
+    })?;
     reputation_summary_from_db(&db, &rated_email)
+}
+
+fn db_store_agent_rating(
+    state: &AppState,
+    agent_id: &str,
+    rater_email: &str,
+    score: f64,
+    note: Option<&str>,
+) -> Result<ReputationSummary, ApiError> {
+    let agent_id = agent_id.trim();
+    if agent_id.is_empty() {
+        return Err(ApiError::bad_request("agent id is required"));
+    }
+    let rater_email = canonical_user_key_from_email(state, rater_email);
+    let score = score.clamp(0.0, 10.0);
+    let note = normalize_optional_value(note);
+    let now = now_unix();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let owner_email: String = db
+        .query_row(
+            "SELECT owner_email FROM agent_connections WHERE id = ?1",
+            params![agent_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|err| ApiError::internal(format!("read agent owner: {err}")))?
+        .ok_or_else(|| ApiError::bad_request("agent not found"))?;
+    if same_user_identity(state, &owner_email, &rater_email) {
+        return Err(ApiError::bad_request("cannot rate your own agent"));
+    }
+    let rater_reputation = reputation_summary_from_db(&db, &rater_email)?;
+    let weight = reputation_feedback_weight(&rater_reputation);
+    db.execute(
+        "INSERT OR IGNORE INTO agent_ratings \
+         (agent_id, rater_email, score, weight, note, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![agent_id, rater_email, score, weight, note, now],
+    )
+    .map_err(|err| ApiError::internal(format!("persist agent rating: {err}")))
+    .and_then(|changed| {
+        if changed == 0 {
+            Err(ApiError::conflict("you have already rated this agent"))
+        } else {
+            Ok(())
+        }
+    })?;
+    agent_reputation_summary_from_db(&db, agent_id)
 }
 
 fn db_create_human_memo(
@@ -538,20 +602,22 @@ fn db_create_human_memo(
         author_email: normalize_email(author_email),
         body: body.to_string(),
         created_at: now_unix(),
+        read_at: None,
     };
     let db = state
         .db
         .lock()
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
     db.execute(
-        "INSERT INTO human_memos (id, target_email, author_email, body, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
+        "INSERT INTO human_memos (id, target_email, author_email, body, created_at, read_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![
             memo.id.to_string(),
             memo.target_email,
             memo.author_email,
             memo.body,
-            memo.created_at
+            memo.created_at,
+            memo.read_at
         ],
     )
     .map_err(|err| ApiError::internal(format!("persist human memo: {err}")))?;
@@ -570,7 +636,7 @@ fn db_list_human_memos(
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
     let mut stmt = db
         .prepare(
-            "SELECT id, target_email, author_email, body, created_at \
+            "SELECT id, target_email, author_email, body, created_at, read_at \
              FROM human_memos \
              WHERE target_email = ?1 \
              ORDER BY created_at DESC \
@@ -585,12 +651,13 @@ fn db_list_human_memos(
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, u64>(4)?,
+                row.get::<_, Option<u64>>(5)?,
             ))
         })
         .map_err(|err| ApiError::internal(format!("query human memos: {err}")))?;
     let mut memos = Vec::new();
     for row in rows {
-        let (id, target_email, author_email, body, created_at) =
+        let (id, target_email, author_email, body, created_at, read_at) =
             row.map_err(|err| ApiError::internal(format!("read human memo: {err}")))?;
         let id = Uuid::parse_str(&id)
             .map_err(|err| ApiError::internal(format!("parse human memo id: {err}")))?;
@@ -600,9 +667,30 @@ fn db_list_human_memos(
             author_email,
             body,
             created_at,
+            read_at,
         });
     }
     Ok(memos)
+}
+
+fn db_mark_human_memos_read(
+    state: &AppState,
+    target_email: &str,
+    reader_email: &str,
+) -> Result<usize, ApiError> {
+    let target_email = normalize_email(target_email);
+    let reader_email = normalize_email(reader_email);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "UPDATE human_memos \
+         SET read_at = COALESCE(read_at, ?3) \
+         WHERE target_email = ?1 AND author_email != ?2 AND read_at IS NULL",
+        params![target_email, reader_email, now_unix()],
+    )
+    .map_err(|err| ApiError::internal(format!("mark human memos read: {err}")))
 }
 
 fn db_touch_agent_connection(
@@ -730,6 +818,7 @@ fn db_list_connected_agents(
             Some("pending"),
             10,
         )?;
+        let reputation = agent_reputation_summary_from_db(&db, &id)?;
         agents.push(ConnectedAgent {
             id,
             owner_email,
@@ -741,6 +830,9 @@ fn db_list_connected_agents(
             last_seen_at,
             last_request_at,
             request_count,
+            reputation: reputation.reputation,
+            ratings_count: reputation.ratings_count,
+            reputation_breakdown: reputation.reputation_breakdown,
             online: last_seen_at >= online_after,
             relation_status: AgentRelationStatus::from_str(&relation_status),
             pending_messages,
@@ -853,6 +945,7 @@ fn db_create_agent_human_message(
         status: "pending".to_string(),
         created_at: now_unix(),
         resolved_at: None,
+        read_at: None,
     };
     let db = state
         .db
@@ -865,6 +958,8 @@ fn db_create_agent_human_message(
 fn db_list_agent_inbox(
     state: &AppState,
     agent_id: &str,
+    unread_only: bool,
+    mark_read: bool,
     limit: u64,
 ) -> Result<Vec<AgentHumanMessage>, ApiError> {
     let db = state
@@ -873,19 +968,38 @@ fn db_list_agent_inbox(
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
     let mut stmt = db
         .prepare(
-            "SELECT id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at \
+            "SELECT id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at, read_at \
              FROM agent_human_messages \
              WHERE agent_id = ?1 AND direction = 'human_to_agent' AND status = 'pending' \
+               AND (?2 = 0 OR read_at IS NULL) \
              ORDER BY created_at DESC \
-             LIMIT ?2",
+             LIMIT ?3",
         )
         .map_err(|err| ApiError::internal(format!("prepare agent inbox: {err}")))?;
     let rows = stmt
-        .query_map(params![agent_id, limit.clamp(1, 200)], agent_message_from_row)
+        .query_map(
+            params![agent_id, if unread_only { 1 } else { 0 }, limit.clamp(1, 200)],
+            agent_message_from_row,
+        )
         .map_err(|err| ApiError::internal(format!("query agent inbox: {err}")))?;
     let mut messages = Vec::new();
     for row in rows {
         messages.push(row.map_err(|err| ApiError::internal(format!("read agent inbox: {err}")))?);
+    }
+    if mark_read && !messages.is_empty() {
+        let read_at = now_unix();
+        for message in &messages {
+            db.execute(
+                "UPDATE agent_human_messages SET read_at = COALESCE(read_at, ?1) WHERE id = ?2",
+                params![read_at, message.id.to_string()],
+            )
+            .map_err(|err| ApiError::internal(format!("mark agent inbox read: {err}")))?;
+        }
+        for message in &mut messages {
+            if message.read_at.is_none() {
+                message.read_at = Some(read_at);
+            }
+        }
     }
     Ok(messages)
 }
@@ -952,6 +1066,7 @@ fn db_upsert_agent_relation(
         },
         created_at: now,
         resolved_at: (next == AgentRelationStatus::Friends).then_some(now),
+        read_at: None,
     };
     insert_agent_message_locked(&db, &message)?;
     Ok(next)
@@ -985,7 +1100,7 @@ fn db_list_agent_messages_for_human_locked(
 ) -> Result<Vec<AgentHumanMessage>, ApiError> {
     let mut stmt = db
         .prepare(
-            "SELECT id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at \
+            "SELECT id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at, read_at \
              FROM agent_human_messages \
              WHERE agent_id = ?1 AND human_email = ?2 AND (?3 IS NULL OR status = ?3) \
              ORDER BY created_at DESC \
@@ -1011,8 +1126,8 @@ fn insert_agent_message_locked(
 ) -> Result<(), ApiError> {
     db.execute(
         "INSERT INTO agent_human_messages \
-         (id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at, read_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![
             message.id.to_string(),
             message.agent_id,
@@ -1022,7 +1137,8 @@ fn insert_agent_message_locked(
             message.body,
             message.status,
             message.created_at,
-            message.resolved_at
+            message.resolved_at,
+            message.read_at
         ],
     )
     .map_err(|err| ApiError::internal(format!("persist agent message: {err}")))?;
@@ -1047,6 +1163,7 @@ fn agent_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentHuma
         status: row.get(6)?,
         created_at: row.get(7)?,
         resolved_at: row.get(8)?,
+        read_at: row.get(9)?,
     })
 }
 
@@ -1173,6 +1290,31 @@ fn reputation_summary_from_db(
     let seed = reputation_seed_from_db(db, &email)?;
     Ok(reputation_summary_from_parts(
         seed.as_ref(),
+        rating_row.0.unwrap_or(0.0),
+        rating_row.1.unwrap_or(0.0),
+        rating_row.2,
+    ))
+}
+
+fn agent_reputation_summary_from_db(
+    db: &Connection,
+    agent_id: &str,
+) -> Result<ReputationSummary, ApiError> {
+    let rating_row = db
+        .query_row(
+            "SELECT SUM(score * weight), SUM(weight), COUNT(*) FROM agent_ratings WHERE agent_id = ?1",
+            params![agent_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<f64>>(0)?,
+                    row.get::<_, Option<f64>>(1)?,
+                    row.get::<_, u64>(2)?,
+                ))
+            },
+        )
+        .map_err(|err| ApiError::internal(format!("read agent reputation: {err}")))?;
+    Ok(reputation_summary_from_parts(
+        None,
         rating_row.0.unwrap_or(0.0),
         rating_row.1.unwrap_or(0.0),
         rating_row.2,

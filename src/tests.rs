@@ -48,6 +48,12 @@ mod tests {
             json!("image/png")
         );
         assert!(schema["properties"].get("image_base64").is_some());
+        assert!(schema["properties"].get("target_human_email").is_some());
+        assert!(
+            ask_humen_text_async_schema()["properties"]
+                .get("target_human_email")
+                .is_some()
+        );
         assert_eq!(
             ask_humen_judgment_async_schema()["required"],
             json!(["title", "prompt"])
@@ -304,6 +310,8 @@ mod tests {
             expires_at: 160,
             tags: Vec::new(),
             assigned_to: None,
+            created_by: None,
+            created_by_agent_id: None,
         };
         let (tx, _rx) = oneshot::channel();
         let mut events = state.events.subscribe();
@@ -801,6 +809,56 @@ mod tests {
     }
 
     #[test]
+    fn agent_can_read_replies_for_requests_it_created_for_visible_humans() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("alice@example.com", 1, "Alice"));
+            let mut bob = new_user_record("bob@example.com", 1, "Bob");
+            bob.visibility = ProfileVisibility::Public;
+            users.insert(bob);
+        }
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: "agent-alice".to_string(),
+            agent_name: "Alice Agent".to_string(),
+            directory_visibility: AgentDirectoryVisibility::PublicUsers,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+        assert_eq!(
+            resolve_request_target_human(&state, &agent, Some("bob@example.com")).unwrap(),
+            "bob@example.com"
+        );
+        let mut request = test_human_request();
+        request.assigned_to = Some("bob@example.com".to_string());
+        request.created_by = Some("alice@example.com".to_string());
+        request.created_by_agent_id = Some(agent.agent_id.clone());
+        let answer = HumanAnswer {
+            answer: "Looks good".to_string(),
+            note: None,
+            answered_by: "bob@example.com".to_string(),
+            answered_at: now_unix(),
+        };
+        db_store_answer(&state, &request, &answer, false).unwrap();
+
+        let replies = db_read_humen_replies(
+            &state,
+            "alice@example.com",
+            ReadLateRepliesArgs {
+                request_id: Some(request.id),
+                since: None,
+                unread_only: false,
+                mark_read: false,
+                limit: Some(10),
+            },
+        )
+        .unwrap();
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].request.assigned_to.as_deref(), Some("bob@example.com"));
+        assert_eq!(replies[0].answer.answer, "Looks good");
+    }
+
+    #[test]
     fn agent_connections_and_relation_requests_are_persisted() {
         let state = test_state();
         let agent = AgentContext {
@@ -837,9 +895,29 @@ mod tests {
         let status = db_request_agent_friend(&state, &agent.agent_id, "bob@example.com", "hi")
             .unwrap();
         assert_eq!(status, AgentRelationStatus::HumanRequested);
-        let inbox = db_list_agent_inbox(&state, &agent.agent_id, 20).unwrap();
+        let inbox = db_list_agent_inbox(&state, &agent.agent_id, false, false, 20).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, "friend_request");
+        assert_eq!(inbox[0].read_at, None);
+        let read_inbox = db_list_agent_inbox(&state, &agent.agent_id, false, true, 20).unwrap();
+        assert_eq!(read_inbox.len(), 1);
+        assert!(read_inbox[0].read_at.is_some());
+        let unread_inbox = db_list_agent_inbox(&state, &agent.agent_id, true, false, 20).unwrap();
+        assert!(unread_inbox.is_empty());
+
+        let agent_rating =
+            db_store_agent_rating(&state, &agent.agent_id, "bob@example.com", 8.0, None).unwrap();
+        assert_eq!(agent_rating.ratings_count, 1);
+        assert_eq!(agent_rating.reputation, 8.0);
+        let repeated =
+            db_store_agent_rating(&state, &agent.agent_id, "bob@example.com", 9.0, None)
+                .unwrap_err();
+        assert_eq!(repeated.status, StatusCode::CONFLICT);
+        assert_eq!(repeated.message, "you have already rated this agent");
+        let own_agent =
+            db_store_agent_rating(&state, &agent.agent_id, "alice@example.com", 10.0, None)
+                .unwrap_err();
+        assert_eq!(own_agent.message, "cannot rate your own agent");
 
         let accepted = db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
         assert_eq!(accepted, AgentRelationStatus::Friends);
@@ -1128,6 +1206,13 @@ mod tests {
         let memos = db_list_human_memos(&state, "bob@example.com", 10).unwrap();
         assert_eq!(memos.len(), 1);
         assert_eq!(memos[0].id, memo.id);
+        assert_eq!(memos[0].read_at, None);
+        assert_eq!(
+            db_mark_human_memos_read(&state, "bob@example.com", "bob@example.com").unwrap(),
+            1
+        );
+        let memos = db_list_human_memos(&state, "bob@example.com", 10).unwrap();
+        assert!(memos[0].read_at.is_some());
 
         let hidden =
             resolve_visible_human_memo_target(&state, "alice@example.com", "dave@example.com")
@@ -1136,7 +1221,7 @@ mod tests {
     }
 
     #[test]
-    fn ratings_validate_targets_and_update_existing_score() {
+    fn ratings_validate_targets_and_reject_repeat_scores() {
         let state = test_state();
         {
             let mut users = state.users.lock().unwrap();
@@ -1198,7 +1283,7 @@ mod tests {
         assert_eq!(first.ratings_count, 1);
         assert_eq!(first.reputation, 7.0);
 
-        let updated = rate_human_from_actor(
+        let repeated = rate_human_from_actor(
             &state,
             "alice@example.com",
             RateHumanRequest {
@@ -1207,9 +1292,12 @@ mod tests {
                 note: Some("better".to_string()),
             },
         )
-        .unwrap();
-        assert_eq!(updated.ratings_count, 1);
-        assert_eq!(updated.reputation, 9.0);
+        .unwrap_err();
+        assert_eq!(repeated.status, StatusCode::CONFLICT);
+        assert_eq!(repeated.message, "you have already rated this human");
+        let unchanged = db_reputation_summary_for(&state, "bob@example.com").unwrap();
+        assert_eq!(unchanged.ratings_count, 1);
+        assert_eq!(unchanged.reputation, 7.0);
     }
 
     #[test]
@@ -1548,6 +1636,8 @@ mod tests {
             expires_at: 160,
             tags: Vec::new(),
             assigned_to: None,
+            created_by: None,
+            created_by_agent_id: None,
         }
     }
 

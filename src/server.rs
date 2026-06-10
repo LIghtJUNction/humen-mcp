@@ -110,6 +110,7 @@ fn api_router() -> Router<AppState> {
         )
         .route("/agents/{id}/accept", post(accept_agent_friend_request))
         .route("/agents/{id}/ask-me", post(create_agent_ask_me_request))
+        .route("/agents/{id}/rate", post(rate_agent))
         .route(
             "/humans/{email}/memos",
             get(list_human_memos).post(create_human_memo),

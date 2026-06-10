@@ -15,6 +15,10 @@ struct HumanRequest {
     tags: Vec<String>,
     #[serde(default)]
     assigned_to: Option<String>,
+    #[serde(default)]
+    created_by: Option<String>,
+    #[serde(default)]
+    created_by_agent_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,6 +57,8 @@ struct CreateHumanRequest {
     timeout_seconds: u64,
     #[serde(default)]
     background: bool,
+    #[serde(default, alias = "human_email", alias = "assigned_to")]
+    target_human_email: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -224,6 +230,7 @@ struct HumanMemo {
     author_email: String,
     body: String,
     created_at: u64,
+    read_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -238,6 +245,9 @@ struct ConnectedAgent {
     last_seen_at: u64,
     last_request_at: Option<u64>,
     request_count: u64,
+    reputation: f64,
+    ratings_count: u64,
+    reputation_breakdown: ReputationBreakdown,
     online: bool,
     relation_status: AgentRelationStatus,
     pending_messages: Vec<AgentHumanMessage>,
@@ -284,6 +294,7 @@ struct AgentHumanMessage {
     status: String,
     created_at: u64,
     resolved_at: Option<u64>,
+    read_at: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -307,6 +318,7 @@ struct PublicUserProfile {
     onboarding_completed: bool,
     online: bool,
     last_login_at: u64,
+    last_seen_at: u64,
     ban_expires_at: Option<u64>,
 }
 
@@ -784,6 +796,13 @@ struct RateHumanRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct RateAgentRequest {
+    score: f64,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ReportHumanRequest {
     #[serde(alias = "email")]
     reported_email: String,
@@ -807,6 +826,15 @@ struct AgentFriendRequestArgs {
     human_email: String,
     #[serde(default)]
     message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListAgentInboxArgs {
+    #[serde(default)]
+    unread_only: bool,
+    #[serde(default)]
+    mark_read: bool,
+    limit: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1041,6 +1069,17 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_human_ratings_rated ON human_ratings(rated_email);
 
+        CREATE TABLE IF NOT EXISTS agent_ratings (
+            agent_id TEXT NOT NULL,
+            rater_email TEXT NOT NULL,
+            score REAL NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
+            note TEXT,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (agent_id, rater_email)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_ratings_agent ON agent_ratings(agent_id);
+
         CREATE TABLE IF NOT EXISTS reputation_seeds (
             email TEXT PRIMARY KEY,
             source TEXT NOT NULL,
@@ -1075,7 +1114,8 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
             target_email TEXT NOT NULL,
             author_email TEXT NOT NULL,
             body TEXT NOT NULL,
-            created_at INTEGER NOT NULL
+            created_at INTEGER NOT NULL,
+            read_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_human_memos_target ON human_memos(target_email, created_at);
         CREATE INDEX IF NOT EXISTS idx_human_memos_author ON human_memos(author_email, created_at);
@@ -1116,7 +1156,8 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
             body TEXT NOT NULL,
             status TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            resolved_at INTEGER
+            resolved_at INTEGER,
+            read_at INTEGER
         );
         CREATE INDEX IF NOT EXISTS idx_agent_messages_agent ON agent_human_messages(agent_id, status, created_at);
         CREATE INDEX IF NOT EXISTS idx_agent_messages_human ON agent_human_messages(human_email, status, created_at);
@@ -1134,6 +1175,14 @@ fn migrate_reputation_schema(conn: &Connection) -> anyhow::Result<()> {
             [],
         )
         .context("add human_ratings.weight column")?;
+    }
+    if !sqlite_table_has_column(conn, "human_memos", "read_at")? {
+        conn.execute("ALTER TABLE human_memos ADD COLUMN read_at INTEGER", [])
+            .context("add human_memos.read_at column")?;
+    }
+    if !sqlite_table_has_column(conn, "agent_human_messages", "read_at")? {
+        conn.execute("ALTER TABLE agent_human_messages ADD COLUMN read_at INTEGER", [])
+            .context("add agent_human_messages.read_at column")?;
     }
     Ok(())
 }

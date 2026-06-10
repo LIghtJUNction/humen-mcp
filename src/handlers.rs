@@ -280,6 +280,26 @@ async fn create_agent_ask_me_request(
     )?))
 }
 
+async fn rate_agent(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<RateAgentRequest>,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    if !payload.score.is_finite() || !(0.0..=10.0).contains(&payload.score) {
+        return Err(ApiError::bad_request("score must be a number from 0 to 10"));
+    }
+    let reputation = db_store_agent_rating(
+        &state,
+        &id,
+        &session.user.email,
+        payload.score,
+        payload.note.as_deref(),
+    )?;
+    Ok(Json(json!({ "ok": true, "reputation": reputation })))
+}
+
 async fn rate_human(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -307,7 +327,11 @@ async fn list_human_memos(
 ) -> Result<Json<Vec<HumanMemo>>, ApiError> {
     let session = require_session(&state, &headers)?;
     let target = resolve_visible_human_memo_target(&state, &session.user.email, &email)?;
-    Ok(Json(db_list_human_memos(&state, &target, 50)?))
+    if same_user_identity(&state, &session.user.email, &target) {
+        let _ = db_mark_human_memos_read(&state, &target, &session.user.email)?;
+    }
+    let memos = db_list_human_memos(&state, &target, 50)?;
+    Ok(Json(memos))
 }
 
 async fn create_human_memo(
@@ -548,7 +572,11 @@ fn report_human_from_actor(
     }
     let report = db_create_human_report(state, &actor, &target, reason)?;
     let note = format!("Report: {reason}");
-    let _ = db_store_human_rating(state, &target, &actor, 0.0, Some(&note))?;
+    match db_store_human_rating(state, &target, &actor, 0.0, Some(&note)) {
+        Ok(_) => {}
+        Err(err) if err.status == StatusCode::CONFLICT => {}
+        Err(err) => return Err(err),
+    }
     Ok(report)
 }
 
@@ -929,6 +957,8 @@ fn create_incoming_request(
             "#webhook".to_string(),
         ],
         assigned_to: assigned_to.map(|email| normalize_email(&email)),
+        created_by: None,
+        created_by_agent_id: None,
     };
     if let Err(err) = db_insert_request(state, &request) {
         warn!(request_id = %request.id, error = %err.message, "failed to persist incoming request");
