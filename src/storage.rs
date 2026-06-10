@@ -371,7 +371,7 @@ fn db_read_humen_replies(
             row.map_err(|err| ApiError::internal(format!("read late reply: {err}")))?;
         let request: HumanRequest = serde_json::from_str(&request_json)
             .map_err(|err| ApiError::internal(format!("parse late request: {err}")))?;
-        if !can_access_request(agent_email, &request) {
+        if !can_access_request(state, agent_email, &request) {
             continue;
         }
         let answer: HumanAnswer = serde_json::from_str(&answer_json)
@@ -455,7 +455,6 @@ fn db_list_agent_tasks(
     include_archived: bool,
     limit: u64,
 ) -> Result<Vec<AgentTask>, ApiError> {
-    let assigned_to = normalize_email(assigned_to);
     let status = status.map(AgentTaskStatus::as_str);
     let include_archived = if include_archived { 1 } else { 0 };
     let db = state
@@ -466,26 +465,26 @@ fn db_list_agent_tasks(
         .prepare(
             "SELECT task_json \
              FROM agent_tasks \
-             WHERE assigned_to = ?1 \
-               AND (?2 IS NULL OR status = ?2) \
-               AND (?3 = 1 OR status != 'archived') \
+             WHERE (?1 IS NULL OR status = ?1) \
+               AND (?2 = 1 OR status != 'archived') \
              ORDER BY updated_at DESC \
-             LIMIT ?4",
+             LIMIT ?3",
         )
         .map_err(|err| ApiError::internal(format!("prepare task query: {err}")))?;
     let rows = stmt
         .query_map(
-            params![assigned_to, status, include_archived, limit.clamp(1, 500)],
+            params![status, include_archived, limit.clamp(1, 500)],
             |row| row.get::<_, String>(0),
         )
         .map_err(|err| ApiError::internal(format!("query tasks: {err}")))?;
     let mut tasks = Vec::new();
     for row in rows {
         let raw = row.map_err(|err| ApiError::internal(format!("read task: {err}")))?;
-        tasks.push(
-            serde_json::from_str(&raw)
-                .map_err(|err| ApiError::internal(format!("parse task: {err}")))?,
-        );
+        let task: AgentTask = serde_json::from_str(&raw)
+            .map_err(|err| ApiError::internal(format!("parse task: {err}")))?;
+        if same_user_identity(state, &task.assigned_to, assigned_to) {
+            tasks.push(task);
+        }
     }
     Ok(tasks)
 }
@@ -604,6 +603,505 @@ fn db_list_human_memos(
         });
     }
     Ok(memos)
+}
+
+fn db_touch_agent_connection(
+    state: &AppState,
+    agent: &AgentContext,
+    headers: &HeaderMap,
+    payload: &McpRequest,
+) -> Result<AgentContext, ApiError> {
+    let now = now_unix();
+    let (agent_id, name, description) = agent_client_identity(agent, headers, payload);
+    let last_tool = payload
+        .params
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(payload.method.as_str())
+        .trim()
+        .chars()
+        .take(120)
+        .collect::<String>();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO agent_connections \
+         (id, owner_email, name, description, current_task, last_tool, first_seen_at, last_seen_at, last_request_at, request_count) \
+         VALUES (?1, ?2, ?3, ?4, '', ?5, ?6, ?6, ?6, 1) \
+         ON CONFLICT(id) DO UPDATE SET \
+           owner_email=excluded.owner_email, \
+           name=excluded.name, \
+           description=excluded.description, \
+           last_tool=excluded.last_tool, \
+           last_seen_at=excluded.last_seen_at, \
+           last_request_at=excluded.last_request_at, \
+           request_count=request_count + 1",
+        params![agent_id, normalize_email(&agent.email), name, description, last_tool, now],
+    )
+    .map_err(|err| ApiError::internal(format!("persist agent connection: {err}")))?;
+    let mut next = agent.clone();
+    next.agent_id = agent_id;
+    next.agent_name = name;
+    Ok(next)
+}
+
+fn db_update_agent_current_task(
+    state: &AppState,
+    agent: &AgentContext,
+    task: &str,
+) -> Result<(), ApiError> {
+    if agent.agent_id.is_empty() {
+        return Ok(());
+    }
+    let task = task.trim().chars().take(500).collect::<String>();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "UPDATE agent_connections SET current_task = ?1, last_seen_at = ?2 WHERE id = ?3",
+        params![task, now_unix(), agent.agent_id],
+    )
+    .map_err(|err| ApiError::internal(format!("update agent current task: {err}")))?;
+    Ok(())
+}
+
+fn db_list_connected_agents(
+    state: &AppState,
+    human_email: &str,
+    limit: u64,
+) -> Result<Vec<ConnectedAgent>, ApiError> {
+    let human_email = normalize_email(human_email);
+    let now = now_unix();
+    let online_after = now.saturating_sub(180);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT c.id, c.owner_email, c.name, c.description, c.current_task, c.last_tool, \
+                    c.first_seen_at, c.last_seen_at, c.last_request_at, c.request_count, \
+                    COALESCE(r.status, 'none') \
+             FROM agent_connections c \
+             LEFT JOIN agent_relations r ON r.agent_id = c.id AND r.human_email = ?1 \
+             ORDER BY c.last_seen_at DESC \
+             LIMIT ?2",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare agent list: {err}")))?;
+    let rows = stmt
+        .query_map(params![human_email, limit.clamp(1, 200)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, u64>(6)?,
+                row.get::<_, u64>(7)?,
+                row.get::<_, Option<u64>>(8)?,
+                row.get::<_, u64>(9)?,
+                row.get::<_, String>(10)?,
+            ))
+        })
+        .map_err(|err| ApiError::internal(format!("query connected agents: {err}")))?;
+    let mut agents = Vec::new();
+    for row in rows {
+        let (
+            id,
+            owner_email,
+            name,
+            description,
+            current_task,
+            last_tool,
+            first_seen_at,
+            last_seen_at,
+            last_request_at,
+            request_count,
+            relation_status,
+        ) = row.map_err(|err| ApiError::internal(format!("read connected agent: {err}")))?;
+        let pending_messages = db_list_agent_messages_for_human_locked(
+            &db,
+            &id,
+            &human_email,
+            Some("pending"),
+            10,
+        )?;
+        agents.push(ConnectedAgent {
+            id,
+            owner_email,
+            name,
+            description,
+            current_task,
+            last_tool,
+            first_seen_at,
+            last_seen_at,
+            last_request_at,
+            request_count,
+            online: last_seen_at >= online_after,
+            relation_status: AgentRelationStatus::from_str(&relation_status),
+            pending_messages,
+        });
+    }
+    Ok(agents)
+}
+
+fn db_agent_exists(state: &AppState, agent_id: &str) -> Result<bool, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let exists = db
+        .query_row(
+            "SELECT 1 FROM agent_connections WHERE id = ?1",
+            params![agent_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|err| ApiError::internal(format!("read agent connection: {err}")))?
+        .is_some();
+    Ok(exists)
+}
+
+fn db_agent_relation_status(
+    state: &AppState,
+    agent_id: &str,
+    human_email: &str,
+) -> Result<AgentRelationStatus, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    agent_relation_status_locked(&db, agent_id, &normalize_email(human_email))
+}
+
+fn db_request_agent_friend(
+    state: &AppState,
+    agent_id: &str,
+    human_email: &str,
+    body: &str,
+) -> Result<AgentRelationStatus, ApiError> {
+    db_upsert_agent_relation(state, agent_id, human_email, body, true)
+}
+
+fn db_request_human_friend_from_agent(
+    state: &AppState,
+    agent_id: &str,
+    human_email: &str,
+    body: &str,
+) -> Result<AgentRelationStatus, ApiError> {
+    db_upsert_agent_relation(state, agent_id, human_email, body, false)
+}
+
+fn db_accept_agent_friend(
+    state: &AppState,
+    agent_id: &str,
+    human_email: &str,
+) -> Result<AgentRelationStatus, ApiError> {
+    let human_email = normalize_email(human_email);
+    let now = now_unix();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let existing = agent_relation_status_locked(&db, agent_id, &human_email)?;
+    if existing == AgentRelationStatus::None {
+        return Err(ApiError::bad_request("agent friend request not found"));
+    }
+    db.execute(
+        "INSERT INTO agent_relations (agent_id, human_email, status, created_at, updated_at) \
+         VALUES (?1, ?2, 'friends', ?3, ?3) \
+         ON CONFLICT(agent_id, human_email) DO UPDATE SET status='friends', updated_at=excluded.updated_at",
+        params![agent_id, human_email, now],
+    )
+    .map_err(|err| ApiError::internal(format!("accept agent friend request: {err}")))?;
+    db.execute(
+        "UPDATE agent_human_messages \
+         SET status='resolved', resolved_at=COALESCE(resolved_at, ?3) \
+         WHERE agent_id = ?1 AND human_email = ?2 AND kind = 'friend_request' AND status = 'pending'",
+        params![agent_id, human_email, now],
+    )
+    .map_err(|err| ApiError::internal(format!("resolve agent friend messages: {err}")))?;
+    Ok(AgentRelationStatus::Friends)
+}
+
+fn db_create_agent_human_message(
+    state: &AppState,
+    agent_id: &str,
+    human_email: &str,
+    direction: &str,
+    kind: &str,
+    body: &str,
+) -> Result<AgentHumanMessage, ApiError> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(ApiError::bad_request("message body is required"));
+    }
+    if body.chars().count() > 2000 {
+        return Err(ApiError::bad_request("message body is too long"));
+    }
+    let message = AgentHumanMessage {
+        id: Uuid::new_v4(),
+        agent_id: agent_id.to_string(),
+        human_email: normalize_email(human_email),
+        direction: direction.to_string(),
+        kind: kind.to_string(),
+        body: body.to_string(),
+        status: "pending".to_string(),
+        created_at: now_unix(),
+        resolved_at: None,
+    };
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    insert_agent_message_locked(&db, &message)?;
+    Ok(message)
+}
+
+fn db_list_agent_inbox(
+    state: &AppState,
+    agent_id: &str,
+    limit: u64,
+) -> Result<Vec<AgentHumanMessage>, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at \
+             FROM agent_human_messages \
+             WHERE agent_id = ?1 AND direction = 'human_to_agent' AND status = 'pending' \
+             ORDER BY created_at DESC \
+             LIMIT ?2",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare agent inbox: {err}")))?;
+    let rows = stmt
+        .query_map(params![agent_id, limit.clamp(1, 200)], agent_message_from_row)
+        .map_err(|err| ApiError::internal(format!("query agent inbox: {err}")))?;
+    let mut messages = Vec::new();
+    for row in rows {
+        messages.push(row.map_err(|err| ApiError::internal(format!("read agent inbox: {err}")))?);
+    }
+    Ok(messages)
+}
+
+fn db_upsert_agent_relation(
+    state: &AppState,
+    agent_id: &str,
+    human_email: &str,
+    body: &str,
+    human_requested: bool,
+) -> Result<AgentRelationStatus, ApiError> {
+    let human_email = normalize_email(human_email);
+    let now = now_unix();
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let existing = agent_relation_status_locked(&db, agent_id, &human_email)?;
+    let next = match (existing, human_requested) {
+        (AgentRelationStatus::Friends, _) => AgentRelationStatus::Friends,
+        (AgentRelationStatus::AgentRequested, true) => AgentRelationStatus::Friends,
+        (AgentRelationStatus::HumanRequested, false) => AgentRelationStatus::Friends,
+        (_, true) => AgentRelationStatus::HumanRequested,
+        (_, false) => AgentRelationStatus::AgentRequested,
+    };
+    db.execute(
+        "INSERT INTO agent_relations \
+         (agent_id, human_email, status, human_message, agent_message, created_at, updated_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
+         ON CONFLICT(agent_id, human_email) DO UPDATE SET \
+           status=excluded.status, \
+           human_message=COALESCE(excluded.human_message, human_message), \
+           agent_message=COALESCE(excluded.agent_message, agent_message), \
+           updated_at=excluded.updated_at",
+        params![
+            agent_id,
+            human_email,
+            next.as_str(),
+            if human_requested { Some(body.trim()) } else { None },
+            if human_requested { None } else { Some(body.trim()) },
+            now
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist agent relation: {err}")))?;
+    let message = AgentHumanMessage {
+        id: Uuid::new_v4(),
+        agent_id: agent_id.to_string(),
+        human_email,
+        direction: if human_requested {
+            "human_to_agent".to_string()
+        } else {
+            "agent_to_human".to_string()
+        },
+        kind: "friend_request".to_string(),
+        body: if body.trim().is_empty() {
+            "Friend request".to_string()
+        } else {
+            body.trim().chars().take(2000).collect()
+        },
+        status: if next == AgentRelationStatus::Friends {
+            "resolved".to_string()
+        } else {
+            "pending".to_string()
+        },
+        created_at: now,
+        resolved_at: (next == AgentRelationStatus::Friends).then_some(now),
+    };
+    insert_agent_message_locked(&db, &message)?;
+    Ok(next)
+}
+
+fn agent_relation_status_locked(
+    db: &Connection,
+    agent_id: &str,
+    human_email: &str,
+) -> Result<AgentRelationStatus, ApiError> {
+    let status = db
+        .query_row(
+            "SELECT status FROM agent_relations WHERE agent_id = ?1 AND human_email = ?2",
+            params![agent_id, human_email],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|err| ApiError::internal(format!("read agent relation: {err}")))?;
+    Ok(status
+        .as_deref()
+        .map(AgentRelationStatus::from_str)
+        .unwrap_or_default())
+}
+
+fn db_list_agent_messages_for_human_locked(
+    db: &Connection,
+    agent_id: &str,
+    human_email: &str,
+    status: Option<&str>,
+    limit: u64,
+) -> Result<Vec<AgentHumanMessage>, ApiError> {
+    let mut stmt = db
+        .prepare(
+            "SELECT id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at \
+             FROM agent_human_messages \
+             WHERE agent_id = ?1 AND human_email = ?2 AND (?3 IS NULL OR status = ?3) \
+             ORDER BY created_at DESC \
+             LIMIT ?4",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare agent messages: {err}")))?;
+    let rows = stmt
+        .query_map(
+            params![agent_id, human_email, status, limit.clamp(1, 100)],
+            agent_message_from_row,
+        )
+        .map_err(|err| ApiError::internal(format!("query agent messages: {err}")))?;
+    let mut messages = Vec::new();
+    for row in rows {
+        messages.push(row.map_err(|err| ApiError::internal(format!("read agent message: {err}")))?);
+    }
+    Ok(messages)
+}
+
+fn insert_agent_message_locked(
+    db: &Connection,
+    message: &AgentHumanMessage,
+) -> Result<(), ApiError> {
+    db.execute(
+        "INSERT INTO agent_human_messages \
+         (id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            message.id.to_string(),
+            message.agent_id,
+            message.human_email,
+            message.direction,
+            message.kind,
+            message.body,
+            message.status,
+            message.created_at,
+            message.resolved_at
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist agent message: {err}")))?;
+    Ok(())
+}
+
+fn agent_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentHumanMessage> {
+    let id: String = row.get(0)?;
+    Ok(AgentHumanMessage {
+        id: Uuid::parse_str(&id).map_err(|err| {
+            rusqlite::Error::FromSqlConversionFailure(
+                0,
+                rusqlite::types::Type::Text,
+                Box::new(err),
+            )
+        })?,
+        agent_id: row.get(1)?,
+        human_email: row.get(2)?,
+        direction: row.get(3)?,
+        kind: row.get(4)?,
+        body: row.get(5)?,
+        status: row.get(6)?,
+        created_at: row.get(7)?,
+        resolved_at: row.get(8)?,
+    })
+}
+
+fn agent_client_identity(
+    agent: &AgentContext,
+    headers: &HeaderMap,
+    payload: &McpRequest,
+) -> (String, String, String) {
+    let client_info = payload.params.get("clientInfo");
+    let client_name = client_info
+        .and_then(|value| value.get("name"))
+        .and_then(Value::as_str)
+        .or_else(|| header_value(headers, "x-humen-agent-name"))
+        .or_else(|| header_value(headers, header::USER_AGENT.as_str()))
+        .unwrap_or("MCP Agent");
+    let client_version = client_info
+        .and_then(|value| value.get("version"))
+        .and_then(Value::as_str)
+        .or_else(|| header_value(headers, "x-humen-agent-version"))
+        .unwrap_or("");
+    let name = if client_version.trim().is_empty() {
+        client_name.trim().to_string()
+    } else {
+        format!("{} {}", client_name.trim(), client_version.trim())
+    }
+    .chars()
+    .take(120)
+    .collect::<String>();
+    let description = header_value(headers, "x-humen-agent-description")
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("MCP client connected as {}", agent.email))
+        .chars()
+        .take(500)
+        .collect::<String>();
+    let explicit_id = header_value(headers, "x-humen-agent-id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let id_source = explicit_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{}|{}|{}", agent.email, client_name, client_version));
+    let mut hasher = Sha256::new();
+    hasher.update(normalize_email(&agent.email).as_bytes());
+    hasher.update(b"|");
+    hasher.update(id_source.as_bytes());
+    let digest = hasher.finalize();
+    let id = digest
+        .iter()
+        .take(12)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    (id, name, description)
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
 }
 
 fn reputation_feedback_weight(rater_reputation: &ReputationSummary) -> f64 {

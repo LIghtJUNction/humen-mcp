@@ -797,11 +797,13 @@ fn require_agent_access(state: &AppState, headers: &HeaderMap) -> Result<AgentCo
             continue;
         };
         if provided == format!("{prefix}{suffix}") {
-            let email = normalize_email(&record.email);
+            let email = canonical_user_key_from_record(record);
             drop(users);
             ensure_user_allowed(state, &email)?;
             return Ok(AgentContext {
                 email,
+                agent_id: String::new(),
+                agent_name: String::new(),
                 directory_visibility: settings.agent_directory_visibility,
                 directory_min_reputation: settings.agent_directory_min_reputation,
             });

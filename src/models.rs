@@ -226,6 +226,66 @@ struct HumanMemo {
     created_at: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ConnectedAgent {
+    id: String,
+    owner_email: String,
+    name: String,
+    description: String,
+    current_task: String,
+    last_tool: String,
+    first_seen_at: u64,
+    last_seen_at: u64,
+    last_request_at: Option<u64>,
+    request_count: u64,
+    online: bool,
+    relation_status: AgentRelationStatus,
+    pending_messages: Vec<AgentHumanMessage>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum AgentRelationStatus {
+    #[default]
+    None,
+    HumanRequested,
+    AgentRequested,
+    Friends,
+}
+
+impl AgentRelationStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::HumanRequested => "human_requested",
+            Self::AgentRequested => "agent_requested",
+            Self::Friends => "friends",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "human_requested" => Self::HumanRequested,
+            "agent_requested" => Self::AgentRequested,
+            "friends" => Self::Friends,
+            _ => Self::None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AgentHumanMessage {
+    id: Uuid,
+    agent_id: String,
+    human_email: String,
+    direction: String,
+    kind: String,
+    body: String,
+    status: String,
+    created_at: u64,
+    resolved_at: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct PublicUserProfile {
     email: String,
@@ -309,6 +369,8 @@ struct Session {
 #[derive(Clone, Debug)]
 struct AgentContext {
     email: String,
+    agent_id: String,
+    agent_name: String,
     directory_visibility: AgentDirectoryVisibility,
     directory_min_reputation: f64,
 }
@@ -734,6 +796,28 @@ struct CreateHumanMemo {
 }
 
 #[derive(Debug, Deserialize)]
+struct AgentPanelMessageCreate {
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentFriendRequestArgs {
+    #[serde(alias = "email")]
+    human_email: String,
+    #[serde(default)]
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AgentAskMeArgs {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AdminUserRequest {
     email: String,
     #[serde(default)]
@@ -995,6 +1079,47 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
         );
         CREATE INDEX IF NOT EXISTS idx_human_memos_target ON human_memos(target_email, created_at);
         CREATE INDEX IF NOT EXISTS idx_human_memos_author ON human_memos(author_email, created_at);
+
+        CREATE TABLE IF NOT EXISTS agent_connections (
+            id TEXT PRIMARY KEY,
+            owner_email TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT NOT NULL,
+            current_task TEXT NOT NULL,
+            last_tool TEXT NOT NULL,
+            first_seen_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            last_request_at INTEGER,
+            request_count INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_connections_owner ON agent_connections(owner_email, last_seen_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_connections_seen ON agent_connections(last_seen_at);
+
+        CREATE TABLE IF NOT EXISTS agent_relations (
+            agent_id TEXT NOT NULL,
+            human_email TEXT NOT NULL,
+            status TEXT NOT NULL,
+            human_message TEXT,
+            agent_message TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (agent_id, human_email)
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_relations_human ON agent_relations(human_email, status, updated_at);
+
+        CREATE TABLE IF NOT EXISTS agent_human_messages (
+            id TEXT PRIMARY KEY,
+            agent_id TEXT NOT NULL,
+            human_email TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            body TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            resolved_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_agent_messages_agent ON agent_human_messages(agent_id, status, created_at);
+        CREATE INDEX IF NOT EXISTS idx_agent_messages_human ON agent_human_messages(human_email, status, created_at);
         "#,
     )
     .context("initialize sqlite schema")?;

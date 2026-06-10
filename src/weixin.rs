@@ -307,7 +307,7 @@ fn webhook_receives_request(
     request: &HumanRequest,
 ) -> bool {
     request_assigned_to_email(request).is_some_and(|assigned_to| {
-        assigned_to == webhook_target_email(state, webhook)
+        same_user_identity(state, &assigned_to, &webhook_target_email(state, webhook))
     })
 }
 
@@ -539,7 +539,9 @@ fn candidate_answer_requests(state: &AppState, target_email: &str) -> Vec<HumanR
         .iter()
         .filter(|entry| {
             let request = entry.value();
-            request_assigned_to_email(request).as_deref() == Some(target_email.as_str())
+            request_assigned_to_email(request)
+                .as_deref()
+                .is_some_and(|assigned_to| same_user_identity(state, assigned_to, &target_email))
                 && now <= request.expires_at
                 && !request
                     .tags
@@ -564,16 +566,20 @@ fn is_answerable_request_for(
 ) -> Result<bool, ApiError> {
     let target_email = normalize_email(target_email);
     if let Some(request) = state.requests.get(&id) {
-        return Ok(request_assigned_to_email(request.value()).as_deref()
-            == Some(target_email.as_str()));
+        return Ok(request_assigned_to_email(request.value())
+            .as_deref()
+            .is_some_and(|assigned_to| same_user_identity(state, assigned_to, &target_email)));
     }
     if let Some(expired) = state.trash.get(&id) {
-        return Ok(request_assigned_to_email(&expired.value().request).as_deref()
-            == Some(target_email.as_str()));
+        return Ok(request_assigned_to_email(&expired.value().request)
+            .as_deref()
+            .is_some_and(|assigned_to| same_user_identity(state, assigned_to, &target_email)));
     }
     Ok(db_get_request(state, id)?.is_some_and(|(request, status)| {
         status != "answered"
-            && request_assigned_to_email(&request).as_deref() == Some(target_email.as_str())
+            && request_assigned_to_email(&request)
+                .as_deref()
+                .is_some_and(|assigned_to| same_user_identity(state, assigned_to, &target_email))
     }))
 }
 

@@ -25,7 +25,7 @@ async fn websocket(mut socket: WebSocket, state: AppState, session: Session) {
     let initial: Vec<_> = state
         .requests
         .iter()
-        .filter(|entry| can_access_request(&session_email, entry.value()))
+        .filter(|entry| can_access_request(&state, &session_email, entry.value()))
         .map(|entry| entry.value().clone())
         .collect();
     let initial_tasks = db_list_agent_tasks(&state, &session_email, None, false, 200)
@@ -63,7 +63,7 @@ async fn websocket(mut socket: WebSocket, state: AppState, session: Session) {
             event = rx.recv() => {
                 match event {
                     Ok(event) => {
-                        if !can_receive_event(&session_email, &event) {
+                        if !can_receive_event(&state, &session_email, &event) {
                             continue;
                         }
                         let Ok(text) = serde_json::to_string(&event) else {
@@ -102,23 +102,22 @@ fn online_user_count(state: &AppState) -> usize {
     online_emails(state).len()
 }
 
-fn can_access_request(email: &str, request: &HumanRequest) -> bool {
+fn can_access_request(state: &AppState, email: &str, request: &HumanRequest) -> bool {
     request
         .assigned_to
         .as_deref()
-        .map(normalize_email)
-        .is_none_or(|assigned_to| assigned_to == normalize_email(email))
+        .is_none_or(|assigned_to| same_user_identity(state, assigned_to, email))
 }
 
-fn can_receive_event(email: &str, event: &ServerEvent) -> bool {
+fn can_receive_event(state: &AppState, email: &str, event: &ServerEvent) -> bool {
     match event {
-        ServerEvent::RequestCreated { request } => can_access_request(email, request),
-        ServerEvent::RequestAnswered { request, .. } => can_access_request(email, request),
+        ServerEvent::RequestCreated { request } => can_access_request(state, email, request),
+        ServerEvent::RequestAnswered { request, .. } => can_access_request(state, email, request),
         ServerEvent::RequestExpired {
             expired_request, ..
-        } => can_access_request(email, &expired_request.request),
+        } => can_access_request(state, email, &expired_request.request),
         ServerEvent::TaskCreated { task } | ServerEvent::TaskUpdated { task } => {
-            normalize_email(&task.assigned_to) == normalize_email(email)
+            same_user_identity(state, &task.assigned_to, email)
         }
         ServerEvent::TrashCleaned { .. } | ServerEvent::PresenceChanged { .. } => true,
     }

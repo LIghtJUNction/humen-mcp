@@ -20,6 +20,7 @@ async fn mcp(
             return Ok(Json(mcp_error(payload.id, -32003, err.message)).into_response());
         }
     };
+    let agent = db_touch_agent_connection(&state, &agent, &headers, &payload)?;
 
     let id = payload.id.clone();
     let result = match payload.method.as_str() {
@@ -100,6 +101,21 @@ async fn mcp(
                     "name": "list_humen_tasks",
                     "description": "List AI-created tasks for the human account attached to this agent secret.",
                     "inputSchema": list_humen_tasks_schema()
+                },
+                {
+                    "name": "list_agent_inbox",
+                    "description": "List pending human-to-agent messages, including friend requests and requests asking this agent to ask that human.",
+                    "inputSchema": json!({ "type": "object", "properties": {} })
+                },
+                {
+                    "name": "request_human_friend",
+                    "description": "Send a friend request from this connected agent to a visible human.",
+                    "inputSchema": request_human_friend_schema()
+                },
+                {
+                    "name": "accept_human_friend",
+                    "description": "Accept a human's pending friend request to this connected agent.",
+                    "inputSchema": request_human_friend_schema()
                 },
                 {
                     "name": "list_online_humens",
@@ -253,6 +269,47 @@ async fn call_tool(
             )?;
             Ok(Json(mcp_text_result(id, json!({ "tasks": tasks }))))
         }
+        "list_agent_inbox" => Ok(Json(mcp_text_result(
+            id,
+            json!({ "messages": db_list_agent_inbox(&state, &agent.agent_id, 100)? }),
+        ))),
+        "request_human_friend" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: AgentFriendRequestArgs = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid request_human_friend arguments: {err}"))
+            })?;
+            let human = resolve_visible_human_for_agent(&state, &agent, &args.human_email)?;
+            let status = db_request_human_friend_from_agent(
+                &state,
+                &agent.agent_id,
+                &human,
+                &args.message,
+            )?;
+            Ok(Json(mcp_text_result(
+                id,
+                json!({ "ok": true, "human_email": human, "relation_status": status }),
+            )))
+        }
+        "accept_human_friend" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: AgentFriendRequestArgs = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid accept_human_friend arguments: {err}"))
+            })?;
+            let human = resolve_visible_human_for_agent(&state, &agent, &args.human_email)?;
+            let status = db_accept_agent_friend(&state, &agent.agent_id, &human)?;
+            Ok(Json(mcp_text_result(
+                id,
+                json!({ "ok": true, "human_email": human, "relation_status": status }),
+            )))
+        }
         "list_online_humens" => {
             let users: Vec<_> = agent_visible_profiles(&state, &agent, None, None)?
                 .into_iter()
@@ -385,6 +442,8 @@ async fn create_humen_request(
         tags,
         assigned_to: Some(agent.email.clone()),
     };
+    let current_task = format!("{}: {}", request.title, request.prompt);
+    db_update_agent_current_task(&state, &agent, &current_task)?;
     let timeout = Duration::from_secs(request.timeout_seconds);
     db_insert_request(&state, &request)?;
     let rx = if background {
@@ -533,6 +592,7 @@ fn create_agent_task_from_agent(
         completed_at: None,
     };
     db_store_agent_task(state, &task)?;
+    db_update_agent_current_task(state, agent, &task.title)?;
     let _ = state
         .events
         .send(ServerEvent::TaskCreated { task: task.clone() });
@@ -784,6 +844,33 @@ fn list_humen_tasks_schema() -> Value {
             }
         }
     })
+}
+
+fn request_human_friend_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["human_email"],
+        "properties": {
+            "human_email": { "type": "string" },
+            "message": { "type": "string" }
+        }
+    })
+}
+
+fn resolve_visible_human_for_agent(
+    state: &AppState,
+    agent: &AgentContext,
+    human_email: &str,
+) -> Result<String, ApiError> {
+    let target = normalize_email(human_email);
+    if target.is_empty() {
+        return Err(ApiError::bad_request("human_email is required"));
+    }
+    agent_visible_profiles(state, agent, None, None)?
+        .into_iter()
+        .map(|profile| normalize_email(&profile.email))
+        .find(|email| email == &target)
+        .ok_or_else(|| ApiError::unauthorized("target human is not visible to this agent"))
 }
 
 fn rate_humen_schema() -> Value {

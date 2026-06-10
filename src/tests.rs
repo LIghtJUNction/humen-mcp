@@ -730,6 +730,8 @@ mod tests {
         let visible = |directory_visibility| {
             let agent = AgentContext {
                 email: "alice@example.com".to_string(),
+                agent_id: "agent-alice".to_string(),
+                agent_name: "Alice Agent".to_string(),
                 directory_visibility,
                 directory_min_reputation: 6.0,
             };
@@ -767,6 +769,8 @@ mod tests {
         let state = test_state();
         let agent = AgentContext {
             email: "alice@example.com".to_string(),
+            agent_id: "agent-alice".to_string(),
+            agent_name: "Alice Agent".to_string(),
             directory_visibility: AgentDirectoryVisibility::SelfOnly,
             directory_min_reputation: default_agent_directory_min_reputation(),
         };
@@ -794,6 +798,89 @@ mod tests {
         assert_eq!(alice_tasks.len(), 1);
         assert_eq!(alice_tasks[0].id, task.id);
         assert!(bob_tasks.is_empty());
+    }
+
+    #[test]
+    fn agent_connections_and_relation_requests_are_persisted() {
+        let state = test_state();
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: String::new(),
+            agent_name: String::new(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-humen-agent-id", "codex-local".parse().unwrap());
+        headers.insert("x-humen-agent-name", "Codex".parse().unwrap());
+        let payload = McpRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: json!({
+                "clientInfo": {
+                    "name": "Codex",
+                    "version": "5"
+                }
+            }),
+        };
+
+        let agent = db_touch_agent_connection(&state, &agent, &headers, &payload).unwrap();
+        db_update_agent_current_task(&state, &agent, "Implement agents panel").unwrap();
+
+        let listed = db_list_connected_agents(&state, "bob@example.com", 20).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "Codex 5");
+        assert_eq!(listed[0].current_task, "Implement agents panel");
+        assert_eq!(listed[0].relation_status, AgentRelationStatus::None);
+
+        let status = db_request_agent_friend(&state, &agent.agent_id, "bob@example.com", "hi")
+            .unwrap();
+        assert_eq!(status, AgentRelationStatus::HumanRequested);
+        let inbox = db_list_agent_inbox(&state, &agent.agent_id, 20).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].kind, "friend_request");
+
+        let accepted = db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
+        assert_eq!(accepted, AgentRelationStatus::Friends);
+    }
+
+    #[test]
+    fn agent_friend_request_to_human_can_be_accepted_by_human() {
+        let state = test_state();
+        let agent_id = "agent-123";
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: String::new(),
+            agent_name: String::new(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-humen-agent-id", agent_id.parse().unwrap());
+        let payload = McpRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: json!({}),
+        };
+        let agent = db_touch_agent_connection(&state, &agent, &headers, &payload).unwrap();
+        let status = db_request_human_friend_from_agent(
+            &state,
+            &agent.agent_id,
+            "bob@example.com",
+            "Can we connect?",
+        )
+        .unwrap();
+        assert_eq!(status, AgentRelationStatus::AgentRequested);
+
+        let listed = db_list_connected_agents(&state, "bob@example.com", 20).unwrap();
+        assert_eq!(listed[0].relation_status, AgentRelationStatus::AgentRequested);
+        assert_eq!(listed[0].pending_messages.len(), 1);
+        assert_eq!(listed[0].pending_messages[0].direction, "agent_to_human");
+
+        let accepted = db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
+        assert_eq!(accepted, AgentRelationStatus::Friends);
     }
 
     #[test]
@@ -851,8 +938,26 @@ mod tests {
         );
 
         assert_eq!(request.assigned_to.as_deref(), Some("alice@example.com"));
-        assert!(can_access_request("alice@example.com", &request));
-        assert!(!can_access_request("bob@example.com", &request));
+        assert!(can_access_request(&state, "alice@example.com", &request));
+        assert!(!can_access_request(&state, "bob@example.com", &request));
+    }
+
+    #[test]
+    fn github_session_key_can_see_requests_assigned_to_email_alias() {
+        let state = test_state();
+        let mut github_record = new_user_record("user@example.com", 1, "GitHub user");
+        github_record.github_id = Some("42".to_string());
+        github_record.login = Some("octo".to_string());
+        {
+            let mut users = state.users.lock().unwrap();
+            users.users.insert("github:42".to_string(), github_record);
+        }
+        let mut request = test_human_request();
+        request.assigned_to = Some("user@example.com".to_string());
+
+        assert!(can_access_request(&state, "github:42", &request));
+        assert!(can_access_request(&state, "octo", &request));
+        assert!(!can_access_request(&state, "other@example.com", &request));
     }
 
     #[test]

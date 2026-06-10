@@ -60,6 +60,10 @@ fn canonical_user_key_from_email(state: &AppState, email: &str) -> String {
         .unwrap_or(wanted)
 }
 
+fn same_user_identity(state: &AppState, left: &str, right: &str) -> bool {
+    canonical_user_key_from_email(state, left) == canonical_user_key_from_email(state, right)
+}
+
 fn canonical_user_key_from_identifier(
     users: &UserStore,
     identifier: &str,

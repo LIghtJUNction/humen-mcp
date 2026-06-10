@@ -7,7 +7,7 @@ async fn list_requests(
     let mut requests: Vec<_> = state
         .requests
         .iter()
-        .filter(|entry| can_access_request(&email, entry.value()))
+        .filter(|entry| can_access_request(&state, &email, entry.value()))
         .map(|entry| entry.value().clone())
         .collect();
     requests.sort_by_key(|request| request.created_at);
@@ -23,7 +23,7 @@ async fn list_trash(
     let mut trash: Vec<_> = state
         .trash
         .iter()
-        .filter(|entry| can_access_request(&email, &entry.value().request))
+        .filter(|entry| can_access_request(&state, &email, &entry.value().request))
         .map(|entry| entry.value().clone())
         .collect();
     trash.sort_by_key(|entry| entry.expired_at);
@@ -39,7 +39,7 @@ async fn list_sent_requests(
     Ok(Json(
         db_list_answered_requests(&state, 100)?
             .into_iter()
-            .filter(|entry| can_access_request(&email, &entry.request))
+            .filter(|entry| can_access_request(&state, &email, &entry.request))
             .collect(),
     ))
 }
@@ -140,7 +140,7 @@ async fn update_agent_task_status(
     let actor = normalize_email(&session.user.email);
     let mut task =
         db_get_agent_task(&state, id)?.ok_or_else(|| ApiError::bad_request("task not found"))?;
-    if normalize_email(&task.assigned_to) != actor {
+    if !same_user_identity(&state, &task.assigned_to, &actor) {
         return Err(ApiError::unauthorized("task is assigned to another user"));
     }
 
@@ -210,6 +210,74 @@ async fn list_tags(
     Ok(Json(
         json!({ "tags": visible_tag_counts_for_session(&state, &session.user.email)? }),
     ))
+}
+
+async fn list_connected_agents(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<ConnectedAgent>>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    Ok(Json(db_list_connected_agents(
+        &state,
+        &session.user.email,
+        100,
+    )?))
+}
+
+async fn create_agent_friend_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentPanelMessageCreate>,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    if !db_agent_exists(&state, &id)? {
+        return Err(ApiError::bad_request("agent not found"));
+    }
+    let status = db_request_agent_friend(&state, &id, &session.user.email, &payload.body)?;
+    Ok(Json(json!({ "ok": true, "relation_status": status })))
+}
+
+async fn accept_agent_friend_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    if !db_agent_exists(&state, &id)? {
+        return Err(ApiError::bad_request("agent not found"));
+    }
+    let status = db_agent_relation_status(&state, &id, &session.user.email)?;
+    if status != AgentRelationStatus::AgentRequested && status != AgentRelationStatus::Friends {
+        return Err(ApiError::bad_request("agent friend request not found"));
+    }
+    let status = db_accept_agent_friend(&state, &id, &session.user.email)?;
+    Ok(Json(json!({ "ok": true, "relation_status": status })))
+}
+
+async fn create_agent_ask_me_request(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentAskMeArgs>,
+) -> Result<Json<AgentHumanMessage>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    if !db_agent_exists(&state, &id)? {
+        return Err(ApiError::bad_request("agent not found"));
+    }
+    let title = normalize_optional_value(Some(payload.title.as_str()))
+        .unwrap_or_else(|| "请问我一个问题".to_string());
+    let prompt = normalize_optional_value(Some(payload.prompt.as_str()))
+        .unwrap_or_else(|| "我在网页面板请求这个 agent 主动询问我。".to_string());
+    let body = format!("{title}\n\n{prompt}");
+    Ok(Json(db_create_agent_human_message(
+        &state,
+        &id,
+        &session.user.email,
+        "human_to_agent",
+        "ask_me",
+        &body,
+    )?))
 }
 
 async fn rate_human(
@@ -773,7 +841,7 @@ fn answer_request_internal(
 
     let mut late = false;
     let request = if let Some((_, request)) = state.requests.remove(&id) {
-        if actor_email.is_some_and(|email| !can_access_request(email, &request)) {
+        if actor_email.is_some_and(|email| !can_access_request(state, email, &request)) {
             state.requests.insert(id, request);
             return Err(ApiError::unauthorized(
                 "request is assigned to another user",
@@ -784,7 +852,7 @@ fn answer_request_internal(
         }
         request
     } else if let Some(expired) = state.trash.get(&id).map(|entry| entry.value().clone()) {
-        if actor_email.is_some_and(|email| !can_access_request(email, &expired.request)) {
+        if actor_email.is_some_and(|email| !can_access_request(state, email, &expired.request)) {
             return Err(ApiError::unauthorized(
                 "request is assigned to another user",
             ));
@@ -793,7 +861,7 @@ fn answer_request_internal(
         late = true;
         expired.request
     } else if let Some((request, status)) = db_get_request(state, id)? {
-        if actor_email.is_some_and(|email| !can_access_request(email, &request)) {
+        if actor_email.is_some_and(|email| !can_access_request(state, email, &request)) {
             return Err(ApiError::unauthorized(
                 "request is assigned to another user",
             ));
