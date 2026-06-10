@@ -238,6 +238,10 @@ fn visible_user_profiles_for_session(
         .values()
         .filter(|record| {
             let record_key = profile_user_key(record, &admin_email);
+            let is_admin_record = normalize_email(&record.email) == admin_email;
+            if is_admin_record && viewer_key != admin_email {
+                return false;
+            }
             record_key == viewer_key
                 || record.visibility == ProfileVisibility::Public
                 || friends.iter().any(|friend| friend == &record_key)
@@ -292,6 +296,7 @@ fn agent_visible_profiles(
             agent_can_see_record(
                 agent,
                 record,
+                &admin_email,
                 &friends,
                 reputation_for(&reputations, &profile_user_key(record, &admin_email)).reputation,
                 min_reputation,
@@ -364,17 +369,23 @@ fn profile_rank(profile: &PublicUserProfile) -> (u8, u8, u64) {
 fn agent_can_see_record(
     agent: &AgentContext,
     record: &UserRecord,
+    admin_email: &str,
     friends: &[String],
     reputation: f64,
     min_reputation: f64,
 ) -> bool {
-    let email = normalize_email(&record.email);
-    if email == agent.email {
+    if normalize_email(&record.email) == normalize_email(admin_email) {
+        return false;
+    }
+    let record_key = profile_user_key(record, admin_email);
+    if record_key == agent.email {
         return true;
     }
     match agent.directory_visibility {
         AgentDirectoryVisibility::SelfOnly => false,
-        AgentDirectoryVisibility::SelfAndFriends => friends.iter().any(|friend| friend == &email),
+        AgentDirectoryVisibility::SelfAndFriends => {
+            friends.iter().any(|friend| friend == &record_key)
+        }
         AgentDirectoryVisibility::PublicUsers => profile_visible_to_agents(record),
         AgentDirectoryVisibility::ReputationAtLeast => {
             profile_visible_to_agents(record) && reputation >= min_reputation
@@ -491,6 +502,11 @@ fn public_profile_from_record_with_online_and_reputation(
     let email = normalize_email(&record.email);
     let is_admin = email == admin_email;
     let account_key = profile_user_key(record, admin_email);
+    let visibility = if is_admin {
+        ProfileVisibility::Private
+    } else {
+        record.visibility
+    };
     let provider = if is_admin {
         AuthProvider::Password
     } else {
@@ -507,8 +523,8 @@ fn public_profile_from_record_with_online_and_reputation(
         reputation_breakdown: reputation.reputation_breakdown,
         friend_code: record.intro_code.clone(),
         intro_code: record.intro_code.clone(),
-        visibility: record.visibility,
-        is_public: record.visibility == ProfileVisibility::Public,
+        visibility,
+        is_public: visibility == ProfileVisibility::Public,
         is_friend: false,
         friend_request_sent: false,
         friend_request_received: false,

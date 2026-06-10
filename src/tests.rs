@@ -480,6 +480,39 @@ mod tests {
     }
 
     #[test]
+    fn password_admin_control_account_is_not_public_talent() {
+        let state = test_state();
+        let now = now_unix();
+        {
+            let mut users = state.users.lock().unwrap();
+            let mut admin = new_user_record("admin-local", now, "Admin control");
+            admin.visibility = ProfileVisibility::Public;
+            admin.is_public = true;
+            users.insert(admin);
+            let mut alice = new_user_record("alice@example.com", now, "Alice");
+            alice.visibility = ProfileVisibility::Public;
+            alice.is_public = true;
+            users.insert(alice);
+        }
+
+        let admin_profiles = user_profiles(&state, None, None).unwrap();
+        let admin = admin_profiles
+            .iter()
+            .find(|profile| normalize_email(&profile.email) == "admin-local")
+            .unwrap();
+        assert!(!admin.is_public);
+        assert_eq!(admin.visibility, ProfileVisibility::Private);
+
+        let visible = visible_user_profiles_for_session(&state, "alice@example.com", None, None)
+            .unwrap()
+            .into_iter()
+            .map(|profile| normalize_email(&profile.email))
+            .collect::<Vec<_>>();
+        assert!(visible.contains(&"alice@example.com".to_string()));
+        assert!(!visible.contains(&"admin-local".to_string()));
+    }
+
+    #[test]
     fn synthetic_admin_is_searchable_by_reserved_tag() {
         let state = test_state();
 
