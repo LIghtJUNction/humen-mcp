@@ -884,6 +884,33 @@ mod tests {
     }
 
     #[test]
+    fn agent_can_accept_pending_human_friend_request_outside_directory_scope() {
+        let state = test_state();
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: "agent-self-only".to_string(),
+            agent_name: "Self only agent".to_string(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("alice@example.com", 1, "Alice"));
+            users.insert(new_user_record("bob@example.com", 1, "Bob"));
+        }
+
+        assert!(resolve_visible_human_for_agent(&state, &agent, "bob@example.com").is_err());
+        db_request_agent_friend(&state, &agent.agent_id, "bob@example.com", "please connect")
+            .unwrap();
+
+        let target =
+            resolve_human_for_agent_friend_accept(&state, &agent, "bob@example.com").unwrap();
+        assert_eq!(target, "bob@example.com");
+        let accepted = db_accept_agent_friend(&state, &agent.agent_id, &target).unwrap();
+        assert_eq!(accepted, AgentRelationStatus::Friends);
+    }
+
+    #[test]
     fn webhook_help_prompt_renders_placeholders_and_can_be_blank() {
         let state = test_state();
         let request = test_human_request();

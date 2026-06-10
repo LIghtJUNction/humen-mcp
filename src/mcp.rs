@@ -303,7 +303,7 @@ async fn call_tool(
             let args: AgentFriendRequestArgs = serde_json::from_value(arguments).map_err(|err| {
                 ApiError::bad_request(format!("invalid accept_human_friend arguments: {err}"))
             })?;
-            let human = resolve_visible_human_for_agent(&state, &agent, &args.human_email)?;
+            let human = resolve_human_for_agent_friend_accept(&state, &agent, &args.human_email)?;
             let status = db_accept_agent_friend(&state, &agent.agent_id, &human)?;
             Ok(Json(mcp_text_result(
                 id,
@@ -871,6 +871,30 @@ fn resolve_visible_human_for_agent(
         .map(|profile| normalize_email(&profile.email))
         .find(|email| email == &target)
         .ok_or_else(|| ApiError::unauthorized("target human is not visible to this agent"))
+}
+
+fn resolve_human_for_agent_friend_accept(
+    state: &AppState,
+    agent: &AgentContext,
+    human_email: &str,
+) -> Result<String, ApiError> {
+    let target = normalize_email(human_email);
+    if target.is_empty() {
+        return Err(ApiError::bad_request("human_email is required"));
+    }
+    if resolve_visible_human_for_agent(state, agent, &target).is_ok() {
+        return Ok(target);
+    }
+    let status = db_agent_relation_status(state, &agent.agent_id, &target)?;
+    if matches!(
+        status,
+        AgentRelationStatus::HumanRequested | AgentRelationStatus::Friends
+    ) {
+        return Ok(target);
+    }
+    Err(ApiError::unauthorized(
+        "target human is not visible to this agent",
+    ))
 }
 
 fn rate_humen_schema() -> Value {
