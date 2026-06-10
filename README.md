@@ -45,6 +45,16 @@ Use it when a workflow needs a person for one small but important step: choosing
 
 For Simplified Chinese documentation, see [README.zh-CN.md](README.zh-CN.md).
 
+## Repository Map
+
+| Area | Path | Purpose |
+| --- | --- | --- |
+| Server | `src/` | Rust MCP server, REST APIs, auth, task lifecycle, and deployment logic. |
+| Web UI | `humen-mcp-webui/` | React task workbench for humans who receive and answer requests. |
+| SDK | `crates/humen-mcp-sdk/` | Shared types for plugin manifests and integration code. |
+| Examples | `examples/` | Minimal client and integration examples. |
+| Deployment | `docs/` | Agent deployment prompt, systemd/nginx notes, packaging, and security details. |
+
 ## Online Panel
 
 | Purpose | URL |
