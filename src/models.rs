@@ -530,6 +530,8 @@ struct WebhookConfig {
     #[serde(default = "default_true")]
     enabled: bool,
     #[serde(default)]
+    assigned_to: Option<String>,
+    #[serde(default)]
     secret: Option<String>,
     #[serde(default = "default_webhook_kind")]
     kind: String,

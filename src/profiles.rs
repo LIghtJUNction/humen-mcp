@@ -696,6 +696,8 @@ fn sanitize_admin_settings(mut settings: AdminSettings) -> AdminSettings {
     for webhook in &mut settings.webhooks {
         webhook.name = webhook.name.trim().to_string();
         webhook.url = webhook.url.trim().to_string();
+        webhook.assigned_to = normalize_optional_value(webhook.assigned_to.as_deref())
+            .map(|email| normalize_email(&email));
         webhook.secret = normalize_optional_value(webhook.secret.as_deref());
         webhook.kind = normalize_webhook_kind(&webhook.kind);
         webhook.help_prompt = webhook.help_prompt.trim().to_string();

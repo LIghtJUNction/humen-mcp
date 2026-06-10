@@ -225,7 +225,10 @@ fn dispatch_webhooks(
     let raw = raw.clone();
     for webhook in webhooks.into_iter().filter(|webhook| webhook.enabled) {
         if normalize_webhook_kind(&webhook.kind) == "wechat" {
-            if event == "request_created" && source != "wechat" {
+            if event == "request_created"
+                && source != "wechat"
+                && webhook_receives_request(state, &webhook, &request)
+            {
                 let state = state.clone();
                 let request = request.clone();
                 tokio::spawn(async move {
@@ -245,6 +248,11 @@ fn dispatch_webhooks(
                     }
                 });
             }
+            continue;
+        }
+        if webhook_has_explicit_target(&webhook)
+            && !webhook_receives_request(state, &webhook, &request)
+        {
             continue;
         }
         if !non_empty(Some(&webhook.url)) {
@@ -277,6 +285,30 @@ fn dispatch_webhooks(
             }
         });
     }
+}
+
+fn webhook_target_email(state: &AppState, webhook: &WebhookConfig) -> String {
+    normalize_optional_value(webhook.assigned_to.as_deref())
+        .map(|email| normalize_email(&email))
+        .unwrap_or_else(|| normalize_email(&state.config.admin_email))
+}
+
+fn webhook_has_explicit_target(webhook: &WebhookConfig) -> bool {
+    normalize_optional_value(webhook.assigned_to.as_deref()).is_some()
+}
+
+fn request_assigned_to_email(request: &HumanRequest) -> Option<String> {
+    request.assigned_to.as_deref().map(normalize_email)
+}
+
+fn webhook_receives_request(
+    state: &AppState,
+    webhook: &WebhookConfig,
+    request: &HumanRequest,
+) -> bool {
+    request_assigned_to_email(request).is_some_and(|assigned_to| {
+        assigned_to == webhook_target_email(state, webhook)
+    })
 }
 
 async fn send_weixin_request_notification(
@@ -456,7 +488,8 @@ fn answer_weixin_message(
     let Some(request_id) = resolve_weixin_answer_target(state, webhook, incoming)? else {
         return Ok(None);
     };
-    if !is_answerable_request(state, request_id)? {
+    let target_email = webhook_target_email(state, webhook);
+    if !is_answerable_request_for(state, request_id, &target_email)? {
         return Ok(None);
     }
     let answer = HumanAnswer {
@@ -476,9 +509,11 @@ fn resolve_weixin_answer_target(
     let mut strings = vec![incoming.content.as_str()];
     collect_json_strings(&incoming.raw, &mut strings);
     if let Some(id) = strings.iter().find_map(|text| find_uuid_in_text(text)) {
-        return Ok(Some(id));
+        let target_email = webhook_target_email(state, webhook);
+        return Ok(is_answerable_request_for(state, id, &target_email)?.then_some(id));
     }
-    let candidates = candidate_answer_requests(state);
+    let target_email = webhook_target_email(state, webhook);
+    let candidates = candidate_answer_requests(state, &target_email);
     for text in &strings {
         let text = text.to_ascii_lowercase();
         if let Some(request) = candidates
@@ -489,21 +524,22 @@ fn resolve_weixin_answer_target(
         }
     }
     if let Some(id) = webhook.weixin_last_request_id {
-        if is_answerable_request(state, id)? {
+        if is_answerable_request_for(state, id, &target_email)? {
             return Ok(Some(id));
         }
     }
     Ok(candidates.first().map(|request| request.id))
 }
 
-fn candidate_answer_requests(state: &AppState) -> Vec<HumanRequest> {
+fn candidate_answer_requests(state: &AppState, target_email: &str) -> Vec<HumanRequest> {
     let now = now_unix();
+    let target_email = normalize_email(target_email);
     let mut requests: Vec<_> = state
         .requests
         .iter()
         .filter(|entry| {
             let request = entry.value();
-            request.assigned_to.is_some()
+            request_assigned_to_email(request).as_deref() == Some(target_email.as_str())
                 && now <= request.expires_at
                 && !request
                     .tags
@@ -521,11 +557,24 @@ fn candidate_answer_requests(state: &AppState) -> Vec<HumanRequest> {
     requests
 }
 
-fn is_answerable_request(state: &AppState, id: Uuid) -> Result<bool, ApiError> {
-    if state.requests.contains_key(&id) || state.trash.contains_key(&id) {
-        return Ok(true);
+fn is_answerable_request_for(
+    state: &AppState,
+    id: Uuid,
+    target_email: &str,
+) -> Result<bool, ApiError> {
+    let target_email = normalize_email(target_email);
+    if let Some(request) = state.requests.get(&id) {
+        return Ok(request_assigned_to_email(request.value()).as_deref()
+            == Some(target_email.as_str()));
     }
-    Ok(db_get_request(state, id)?.is_some_and(|(_, status)| status != "answered"))
+    if let Some(expired) = state.trash.get(&id) {
+        return Ok(request_assigned_to_email(&expired.value().request).as_deref()
+            == Some(target_email.as_str()));
+    }
+    Ok(db_get_request(state, id)?.is_some_and(|(request, status)| {
+        status != "answered"
+            && request_assigned_to_email(&request).as_deref() == Some(target_email.as_str())
+    }))
 }
 
 fn collect_json_strings<'a>(value: &'a Value, output: &mut Vec<&'a str>) {
@@ -717,7 +766,8 @@ async fn poll_weixin_updates_once(state: AppState, webhook: WebhookConfig) -> Re
                 );
             }
             Ok(None) => {
-                let request = create_incoming_request(&state, &incoming);
+                let target_email = webhook_target_email(&state, &webhook);
+                let request = create_incoming_request(&state, &incoming, Some(target_email));
                 dispatch_webhooks(
                     &state,
                     "message_received",
@@ -732,7 +782,8 @@ async fn poll_weixin_updates_once(state: AppState, webhook: WebhookConfig) -> Re
                     error = %err.message,
                     "Weixin reply could not be applied as an answer"
                 );
-                let request = create_incoming_request(&state, &incoming);
+                let target_email = webhook_target_email(&state, &webhook);
+                let request = create_incoming_request(&state, &incoming, Some(target_email));
                 dispatch_webhooks(
                     &state,
                     "message_received",

@@ -777,7 +777,11 @@ fn answer_request_internal(
     })
 }
 
-fn create_incoming_request(state: &AppState, incoming: &IncomingMessage) -> HumanRequest {
+fn create_incoming_request(
+    state: &AppState,
+    incoming: &IncomingMessage,
+    assigned_to: Option<String>,
+) -> HumanRequest {
     let now = now_unix();
     let sender = incoming.sender.trim();
     let title = if sender.is_empty() {
@@ -809,7 +813,7 @@ fn create_incoming_request(state: &AppState, incoming: &IncomingMessage) -> Huma
             "#weixin".to_string(),
             "#webhook".to_string(),
         ],
-        assigned_to: None,
+        assigned_to: assigned_to.map(|email| normalize_email(&email)),
     };
     if let Err(err) = db_insert_request(state, &request) {
         warn!(request_id = %request.id, error = %err.message, "failed to persist incoming request");

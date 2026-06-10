@@ -817,6 +817,93 @@ mod tests {
     }
 
     #[test]
+    fn weixin_webhook_only_receives_requests_for_its_assigned_inbox() {
+        let state = test_state();
+        let mut webhook = test_webhook(String::new());
+        webhook.assigned_to = Some("alice@example.com".to_string());
+
+        let mut alice_request = test_human_request();
+        alice_request.assigned_to = Some("alice@example.com".to_string());
+        let mut bob_request = test_human_request();
+        bob_request.assigned_to = Some("bob@example.com".to_string());
+        let mut broadcast_request = test_human_request();
+        broadcast_request.assigned_to = None;
+
+        assert!(webhook_receives_request(&state, &webhook, &alice_request));
+        assert!(!webhook_receives_request(&state, &webhook, &bob_request));
+        assert!(!webhook_receives_request(&state, &webhook, &broadcast_request));
+    }
+
+    #[test]
+    fn weixin_incoming_messages_enter_the_bound_web_inbox() {
+        let state = test_state();
+        let incoming = IncomingMessage {
+            source: "wechat".to_string(),
+            sender: "friend".to_string(),
+            content: "ping".to_string(),
+            raw: json!({ "text": "ping" }),
+        };
+
+        let request = create_incoming_request(
+            &state,
+            &incoming,
+            Some("Alice@Example.COM".to_string()),
+        );
+
+        assert_eq!(request.assigned_to.as_deref(), Some("alice@example.com"));
+        assert!(can_access_request("alice@example.com", &request));
+        assert!(!can_access_request("bob@example.com", &request));
+    }
+
+    #[test]
+    fn weixin_answers_cannot_cross_webhook_inbox_boundaries() {
+        let state = test_state();
+        let now = now_unix();
+        let mut alice_request = test_human_request();
+        alice_request.assigned_to = Some("alice@example.com".to_string());
+        alice_request.created_at = now;
+        alice_request.expires_at = now.saturating_add(60);
+        let mut bob_request = test_human_request();
+        bob_request.id = Uuid::new_v4();
+        bob_request.assigned_to = Some("bob@example.com".to_string());
+        bob_request.created_at = now;
+        bob_request.expires_at = now.saturating_add(60);
+        state
+            .requests
+            .insert(alice_request.id, alice_request.clone());
+        state.requests.insert(bob_request.id, bob_request.clone());
+
+        let mut webhook = test_webhook(String::new());
+        webhook.assigned_to = Some("bob@example.com".to_string());
+        webhook.weixin_last_request_id = Some(alice_request.id);
+        let incoming = IncomingMessage {
+            source: "wechat".to_string(),
+            sender: "friend".to_string(),
+            content: format!("answer {}", alice_request.id),
+            raw: json!({}),
+        };
+
+        assert!(answer_weixin_message(&state, &webhook, &incoming)
+            .unwrap()
+            .is_none());
+        assert!(state.requests.contains_key(&alice_request.id));
+        assert!(state.requests.contains_key(&bob_request.id));
+
+        let bob_incoming = IncomingMessage {
+            source: "wechat".to_string(),
+            sender: "friend".to_string(),
+            content: format!("answer {}", request_short_id(bob_request.id)),
+            raw: json!({}),
+        };
+        let answered = answer_weixin_message(&state, &webhook, &bob_incoming)
+            .unwrap()
+            .unwrap();
+        assert_eq!(answered.request.id, bob_request.id);
+        assert!(state.requests.contains_key(&alice_request.id));
+        assert!(!state.requests.contains_key(&bob_request.id));
+    }
+
+    #[test]
     fn init_admin_writes_env_file() {
         let env_file = std::env::temp_dir().join(format!("humen-mcp-env-{}.env", Uuid::new_v4()));
 
@@ -1300,6 +1387,7 @@ mod tests {
             name: "Test webhook".to_string(),
             url: String::new(),
             enabled: true,
+            assigned_to: None,
             secret: None,
             kind: "wechat".to_string(),
             help_prompt,
