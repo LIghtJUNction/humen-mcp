@@ -856,6 +856,29 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].request.assigned_to.as_deref(), Some("bob@example.com"));
         assert_eq!(replies[0].answer.answer, "Looks good");
+
+        assert!(db_hide_human_request(&state, "bob@example.com", request.id).unwrap());
+        assert!(!db_hide_human_request(&state, "bob@example.com", request.id).unwrap());
+        assert!(db_hidden_request_ids(&state, "bob@example.com")
+            .unwrap()
+            .contains(&request.id));
+        assert!(!db_hidden_request_ids(&state, "alice@example.com")
+            .unwrap()
+            .contains(&request.id));
+
+        let replies = db_read_humen_replies(
+            &state,
+            "alice@example.com",
+            ReadLateRepliesArgs {
+                request_id: Some(request.id),
+                since: None,
+                unread_only: false,
+                mark_read: false,
+                limit: Some(10),
+            },
+        )
+        .unwrap();
+        assert_eq!(replies.len(), 1);
     }
 
     #[test]

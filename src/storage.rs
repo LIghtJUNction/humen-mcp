@@ -125,6 +125,48 @@ fn db_get_request(state: &AppState, id: Uuid) -> Result<Option<(HumanRequest, St
     Ok(Some((request, status)))
 }
 
+fn db_hidden_request_ids(state: &AppState, user_email: &str) -> Result<HashSet<Uuid>, ApiError> {
+    let user_email = canonical_user_key_from_email(state, user_email);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare("SELECT request_id FROM human_request_hides WHERE user_email = ?1")
+        .map_err(|err| ApiError::internal(format!("prepare hidden requests query: {err}")))?;
+    let rows = stmt
+        .query_map(params![user_email], |row| row.get::<_, String>(0))
+        .map_err(|err| ApiError::internal(format!("query hidden requests: {err}")))?;
+    let mut ids = HashSet::new();
+    for row in rows {
+        let raw = row.map_err(|err| ApiError::internal(format!("read hidden request: {err}")))?;
+        if let Ok(id) = Uuid::parse_str(&raw) {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
+}
+
+fn db_hide_human_request(
+    state: &AppState,
+    user_email: &str,
+    request_id: Uuid,
+) -> Result<bool, ApiError> {
+    let user_email = canonical_user_key_from_email(state, user_email);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let changed = db
+        .execute(
+            "INSERT OR IGNORE INTO human_request_hides (user_email, request_id, hidden_at) \
+             VALUES (?1, ?2, ?3)",
+            params![user_email, request_id.to_string(), now_unix()],
+        )
+        .map_err(|err| ApiError::internal(format!("hide request: {err}")))?;
+    Ok(changed > 0)
+}
+
 #[allow(dead_code)]
 fn db_list_pending_requests(state: &AppState) -> Result<Vec<HumanRequest>, ApiError> {
     let db = state

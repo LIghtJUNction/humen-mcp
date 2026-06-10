@@ -1044,6 +1044,14 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
         CREATE INDEX IF NOT EXISTS idx_human_requests_status ON human_requests(status);
         CREATE INDEX IF NOT EXISTS idx_human_requests_answered_late ON human_requests(answered_late, answered_at);
 
+        CREATE TABLE IF NOT EXISTS human_request_hides (
+            user_email TEXT NOT NULL,
+            request_id TEXT NOT NULL,
+            hidden_at INTEGER NOT NULL,
+            PRIMARY KEY (user_email, request_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_human_request_hides_user ON human_request_hides(user_email, hidden_at);
+
         CREATE TABLE IF NOT EXISTS agent_tasks (
             id TEXT PRIMARY KEY,
             task_json TEXT NOT NULL,

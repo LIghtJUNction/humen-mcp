@@ -94,6 +94,7 @@ fn api_router() -> Router<AppState> {
             post(admin_weixin_logout),
         )
         .route("/requests", get(list_requests))
+        .route("/requests/{id}/hide", post(hide_request))
         .route("/requests/{id}/answer", post(answer_request))
         .route("/sent", get(list_sent_requests))
         .route("/stats/leaderboard", get(list_leaderboard))

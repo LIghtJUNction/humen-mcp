@@ -4,10 +4,13 @@ async fn list_requests(
 ) -> Result<Json<Vec<HumanRequest>>, ApiError> {
     let session = require_session(&state, &headers)?;
     let email = normalize_email(&session.user.email);
+    let hidden = db_hidden_request_ids(&state, &email)?;
     let mut requests: Vec<_> = state
         .requests
         .iter()
-        .filter(|entry| can_access_request(&state, &email, entry.value()))
+        .filter(|entry| {
+            can_access_request(&state, &email, entry.value()) && !hidden.contains(entry.key())
+        })
         .map(|entry| entry.value().clone())
         .collect();
     requests.sort_by_key(|request| request.created_at);
@@ -20,10 +23,13 @@ async fn list_trash(
 ) -> Result<Json<Vec<ExpiredRequest>>, ApiError> {
     let session = require_session(&state, &headers)?;
     let email = normalize_email(&session.user.email);
+    let hidden = db_hidden_request_ids(&state, &email)?;
     let mut trash: Vec<_> = state
         .trash
         .iter()
-        .filter(|entry| can_access_request(&state, &email, &entry.value().request))
+        .filter(|entry| {
+            can_access_request(&state, &email, &entry.value().request) && !hidden.contains(entry.key())
+        })
         .map(|entry| entry.value().clone())
         .collect();
     trash.sort_by_key(|entry| entry.expired_at);
@@ -36,10 +42,14 @@ async fn list_sent_requests(
 ) -> Result<Json<Vec<AnsweredRequest>>, ApiError> {
     let session = require_session(&state, &headers)?;
     let email = normalize_email(&session.user.email);
+    let hidden = db_hidden_request_ids(&state, &email)?;
     Ok(Json(
         db_list_answered_requests(&state, 100)?
             .into_iter()
-            .filter(|entry| can_access_request(&state, &email, &entry.request))
+            .filter(|entry| {
+                can_access_request(&state, &email, &entry.request)
+                    && !hidden.contains(&entry.request.id)
+            })
             .collect(),
     ))
 }
@@ -166,13 +176,48 @@ async fn clear_trash(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Value>, ApiError> {
-    require_admin(&state, &headers)?;
-    let removed_count = state.trash.len();
-    state.trash.clear();
+    let session = require_session(&state, &headers)?;
+    let email = normalize_email(&session.user.email);
+    let hidden = db_hidden_request_ids(&state, &email)?;
+    let ids: Vec<_> = state
+        .trash
+        .iter()
+        .filter(|entry| {
+            can_access_request(&state, &email, &entry.value().request) && !hidden.contains(entry.key())
+        })
+        .map(|entry| *entry.key())
+        .collect();
+    for id in &ids {
+        db_hide_human_request(&state, &email, *id)?;
+    }
+    let removed_count = ids.len();
     let _ = state
         .events
         .send(ServerEvent::TrashCleaned { removed_count });
     Ok(Json(json!({ "ok": true, "removed_count": removed_count })))
+}
+
+async fn hide_request(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let email = normalize_email(&session.user.email);
+    let request = if let Some(request) = state.requests.get(&id).map(|entry| entry.clone()) {
+        request
+    } else if let Some(expired) = state.trash.get(&id).map(|entry| entry.request.clone()) {
+        expired
+    } else {
+        db_get_request(&state, id)?
+            .map(|(request, _)| request)
+            .ok_or_else(|| ApiError::bad_request("request not found"))?
+    };
+    if !can_access_request(&state, &email, &request) {
+        return Err(ApiError::unauthorized("request belongs to another user"));
+    }
+    let changed = db_hide_human_request(&state, &email, id)?;
+    Ok(Json(json!({ "ok": true, "hidden": changed })))
 }
 
 async fn list_online_users(
