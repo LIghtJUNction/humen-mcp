@@ -232,6 +232,53 @@ async fn report_human(
     Ok(Json(json!({ "ok": true, "report": report })))
 }
 
+async fn list_human_memos(
+    State(state): State<AppState>,
+    Path(email): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<Vec<HumanMemo>>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let target = resolve_visible_human_memo_target(&state, &session.user.email, &email)?;
+    Ok(Json(db_list_human_memos(&state, &target, 50)?))
+}
+
+async fn create_human_memo(
+    State(state): State<AppState>,
+    Path(email): Path<String>,
+    headers: HeaderMap,
+    Json(payload): Json<CreateHumanMemo>,
+) -> Result<Json<HumanMemo>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    let actor = normalize_email(&session.user.email);
+    let target = resolve_visible_human_memo_target(&state, &actor, &email)?;
+    Ok(Json(db_create_human_memo(
+        &state,
+        &target,
+        &actor,
+        &payload.body,
+    )?))
+}
+
+fn resolve_visible_human_memo_target(
+    state: &AppState,
+    viewer_email: &str,
+    target_email: &str,
+) -> Result<String, ApiError> {
+    let target = normalize_email(target_email);
+    if target.is_empty() {
+        return Err(ApiError::bad_request("target human is required"));
+    }
+    if normalize_email(viewer_email) == target {
+        return Ok(target);
+    }
+    let visible = visible_user_profiles_for_session(state, viewer_email, None, None)?;
+    visible
+        .into_iter()
+        .map(|profile| normalize_email(&profile.email))
+        .find(|email| email == &target)
+        .ok_or_else(|| ApiError::unauthorized("target human is not visible to this user"))
+}
+
 async fn list_friends(
     State(state): State<AppState>,
     headers: HeaderMap,

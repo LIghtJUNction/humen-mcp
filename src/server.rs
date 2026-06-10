@@ -103,6 +103,10 @@ fn api_router() -> Router<AppState> {
         .route("/trash/clear", post(clear_trash))
         .route("/users/online", get(list_online_users))
         .route("/users/search", get(search_users))
+        .route(
+            "/humans/{email}/memos",
+            get(list_human_memos).post(create_human_memo),
+        )
         .route("/humans/rate", post(rate_human))
         .route("/humans/report", post(report_human))
         .route("/leaderboard", get(list_leaderboard))

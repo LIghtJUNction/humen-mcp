@@ -966,6 +966,44 @@ mod tests {
     }
 
     #[test]
+    fn human_memos_are_scoped_to_visible_profiles() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("alice@example.com", 1, "Alice"));
+            let mut bob = new_user_record("bob@example.com", 1, "Bob");
+            bob.is_public = true;
+            users.insert(bob);
+            let mut dave = new_user_record("dave@example.com", 1, "Dave");
+            dave.is_public = false;
+            users.insert(dave);
+        }
+
+        let target =
+            resolve_visible_human_memo_target(&state, "alice@example.com", "bob@example.com")
+                .unwrap();
+        let memo = db_create_human_memo(
+            &state,
+            &target,
+            "alice@example.com",
+            "  Follow up after lunch.  ",
+        )
+        .unwrap();
+        assert_eq!(memo.target_email, "bob@example.com");
+        assert_eq!(memo.author_email, "alice@example.com");
+        assert_eq!(memo.body, "Follow up after lunch.");
+
+        let memos = db_list_human_memos(&state, "bob@example.com", 10).unwrap();
+        assert_eq!(memos.len(), 1);
+        assert_eq!(memos[0].id, memo.id);
+
+        let hidden =
+            resolve_visible_human_memo_target(&state, "alice@example.com", "dave@example.com")
+                .unwrap_err();
+        assert_eq!(hidden.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
     fn ratings_validate_targets_and_update_existing_score() {
         let state = test_state();
         {

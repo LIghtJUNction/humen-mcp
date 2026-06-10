@@ -217,6 +217,15 @@ struct LateHumanReply {
     read_at: Option<u64>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct HumanMemo {
+    id: Uuid,
+    target_email: String,
+    author_email: String,
+    body: String,
+    created_at: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct PublicUserProfile {
     email: String,
@@ -720,6 +729,11 @@ struct ReportHumanRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct CreateHumanMemo {
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AdminUserRequest {
     email: String,
     #[serde(default)]
@@ -971,6 +985,16 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
             status TEXT NOT NULL DEFAULT 'open'
         );
         CREATE INDEX IF NOT EXISTS idx_human_reports_status ON human_reports(status, created_at);
+
+        CREATE TABLE IF NOT EXISTS human_memos (
+            id TEXT PRIMARY KEY,
+            target_email TEXT NOT NULL,
+            author_email TEXT NOT NULL,
+            body TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_human_memos_target ON human_memos(target_email, created_at);
+        CREATE INDEX IF NOT EXISTS idx_human_memos_author ON human_memos(author_email, created_at);
         "#,
     )
     .context("initialize sqlite schema")?;

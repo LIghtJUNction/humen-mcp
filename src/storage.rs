@@ -520,6 +520,92 @@ fn db_store_human_rating(
     reputation_summary_from_db(&db, &rated_email)
 }
 
+fn db_create_human_memo(
+    state: &AppState,
+    target_email: &str,
+    author_email: &str,
+    body: &str,
+) -> Result<HumanMemo, ApiError> {
+    let body = body.trim();
+    if body.is_empty() {
+        return Err(ApiError::bad_request("memo body is required"));
+    }
+    if body.chars().count() > 2000 {
+        return Err(ApiError::bad_request("memo body is too long"));
+    }
+    let memo = HumanMemo {
+        id: Uuid::new_v4(),
+        target_email: normalize_email(target_email),
+        author_email: normalize_email(author_email),
+        body: body.to_string(),
+        created_at: now_unix(),
+    };
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.execute(
+        "INSERT INTO human_memos (id, target_email, author_email, body, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            memo.id.to_string(),
+            memo.target_email,
+            memo.author_email,
+            memo.body,
+            memo.created_at
+        ],
+    )
+    .map_err(|err| ApiError::internal(format!("persist human memo: {err}")))?;
+    Ok(memo)
+}
+
+fn db_list_human_memos(
+    state: &AppState,
+    target_email: &str,
+    limit: u64,
+) -> Result<Vec<HumanMemo>, ApiError> {
+    let target_email = normalize_email(target_email);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT id, target_email, author_email, body, created_at \
+             FROM human_memos \
+             WHERE target_email = ?1 \
+             ORDER BY created_at DESC \
+             LIMIT ?2",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare human memos query: {err}")))?;
+    let rows = stmt
+        .query_map(params![target_email, limit.clamp(1, 100)], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, u64>(4)?,
+            ))
+        })
+        .map_err(|err| ApiError::internal(format!("query human memos: {err}")))?;
+    let mut memos = Vec::new();
+    for row in rows {
+        let (id, target_email, author_email, body, created_at) =
+            row.map_err(|err| ApiError::internal(format!("read human memo: {err}")))?;
+        let id = Uuid::parse_str(&id)
+            .map_err(|err| ApiError::internal(format!("parse human memo id: {err}")))?;
+        memos.push(HumanMemo {
+            id,
+            target_email,
+            author_email,
+            body,
+            created_at,
+        });
+    }
+    Ok(memos)
+}
+
 fn reputation_feedback_weight(rater_reputation: &ReputationSummary) -> f64 {
     (rater_reputation.reputation.clamp(0.0, 10.0) / 5.0).clamp(0.5, 2.0)
 }
