@@ -1,3 +1,5 @@
+const HUMEN_REPLY_AVAILABLE_NOTIFICATION: &str = "notifications/humen/reply_available";
+
 async fn mcp(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -27,7 +29,14 @@ async fn mcp(
         "initialize" => json!({
             "protocolVersion": "2025-03-26",
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "experimental": {
+                    "humenNotifications": {
+                        "transport": "streamable-http-sse",
+                        "replyAvailableMethod": HUMEN_REPLY_AVAILABLE_NOTIFICATION,
+                        "fallbackTool": "read_humen_replies"
+                    }
+                }
             },
             "serverInfo": {
                 "name": "humen-mcp",
@@ -59,7 +68,7 @@ async fn mcp(
                 },
                 {
                     "name": "ask_humen_async",
-                    "description": "Create a human request and return immediately with request_id. Poll read_humen_replies for the answer.",
+                    "description": "Create a human request and return immediately with request_id. Prefer GET /mcp notifications for reply_available; fall back to read_humen_replies polling when notifications are unavailable.",
                     "inputSchema": ask_humen_async_schema()
                 },
                 {
@@ -79,8 +88,28 @@ async fn mcp(
                 },
                 {
                     "name": "read_humen_replies",
-                    "description": "Read completed human replies for the user attached to this agent secret, optionally filtered by request_id.",
+                    "description": "Read completed human replies for the user attached to this agent secret, optionally filtered by request_id. Use after reply_available notifications or as a polling fallback.",
                     "inputSchema": read_humen_replies_schema()
+                },
+                {
+                    "name": "list_humen_nodes",
+                    "description": "List configured child humen-mcp federation nodes visible from this server. Secrets are never returned.",
+                    "inputSchema": json!({ "type": "object", "properties": {} })
+                },
+                {
+                    "name": "search_humen_network",
+                    "description": "Search visible human profiles across configured child humen-mcp nodes.",
+                    "inputSchema": search_humen_network_schema()
+                },
+                {
+                    "name": "ask_humen_network_async",
+                    "description": "Create a non-blocking human request on a configured child humen-mcp node and collect the answer through read_humen_replies.",
+                    "inputSchema": ask_humen_network_async_schema()
+                },
+                {
+                    "name": "read_humen_network_ledger",
+                    "description": "Read recent local federation ledger entries. The ledger is hash-chained for tamper-evident cross-node request auditing.",
+                    "inputSchema": read_humen_network_ledger_schema()
                 },
                 {
                     "name": "list_humen_plugins",
@@ -172,6 +201,129 @@ async fn mcp(
     .into_response())
 }
 
+struct McpSseStreamState {
+    state: AppState,
+    agent_email: String,
+    stream_id: Uuid,
+    events: broadcast::Receiver<ServerEvent>,
+    shutdown: broadcast::Receiver<()>,
+}
+
+impl Drop for McpSseStreamState {
+    fn drop(&mut self) {
+        cleanup_mcp_stream(&self.state, &self.agent_email, self.stream_id);
+    }
+}
+
+fn mcp_accepts_sse(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| {
+            accept
+                .split(',')
+                .any(|part| part.trim().starts_with("text/event-stream"))
+        })
+}
+
+fn mcp_sse(
+    state: AppState,
+    agent: AgentContext,
+) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+    let agent_email = normalize_email(&agent.email);
+    let stream_id = Uuid::new_v4();
+    state.mcp_streams.insert(agent_email.clone(), stream_id);
+    let stream_state = McpSseStreamState {
+        events: state.events.subscribe(),
+        shutdown: state.shutdown.subscribe(),
+        state,
+        agent_email,
+        stream_id,
+    };
+    let stream = stream::unfold(stream_state, |mut stream_state| async move {
+        loop {
+            tokio::select! {
+                _ = stream_state.shutdown.recv() => {
+                    cleanup_mcp_stream(&stream_state.state, &stream_state.agent_email, stream_state.stream_id);
+                    return None;
+                }
+                event = stream_state.events.recv() => {
+                    match event {
+                        Ok(event) => {
+                            if !is_active_mcp_stream(&stream_state.state, &stream_state.agent_email, stream_state.stream_id) {
+                                continue;
+                            }
+                            let Some(event) = mcp_sse_event(&stream_state.state, &stream_state.agent_email, &event) else {
+                                continue;
+                            };
+                            return Some((Ok(event), stream_state));
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => {
+                            cleanup_mcp_stream(&stream_state.state, &stream_state.agent_email, stream_state.stream_id);
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+fn is_active_mcp_stream(state: &AppState, agent_email: &str, stream_id: Uuid) -> bool {
+    state
+        .mcp_streams
+        .get(agent_email)
+        .is_some_and(|active| *active.value() == stream_id)
+}
+
+fn cleanup_mcp_stream(state: &AppState, agent_email: &str, stream_id: Uuid) {
+    let active = state
+        .mcp_streams
+        .get(agent_email)
+        .map(|entry| *entry.value());
+    if active == Some(stream_id) {
+        state.mcp_streams.remove(agent_email);
+    }
+}
+
+fn mcp_sse_event(state: &AppState, agent_email: &str, event: &ServerEvent) -> Option<Event> {
+    match event {
+        ServerEvent::RequestAnswered {
+            id,
+            request,
+            answered_late,
+            ..
+        } if can_access_request(state, agent_email, request)
+            || agent_created_request(state, agent_email, request) =>
+        {
+            let message = mcp_reply_available_notification(*id, request, *answered_late);
+            Some(
+                Event::default()
+                    .event("message")
+                    .id(format!("reply-available-{id}"))
+                    .data(message.to_string()),
+            )
+        }
+        _ => None,
+    }
+}
+
+fn mcp_reply_available_notification(id: Uuid, request: &HumanRequest, answered_late: bool) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": HUMEN_REPLY_AVAILABLE_NOTIFICATION,
+        "params": {
+            "request_id": id,
+            "title": request.title.clone(),
+            "answered_late": answered_late,
+            "reply_tool": "read_humen_replies",
+            "fallback_tool": "read_humen_replies"
+        }
+    })
+}
+
 async fn call_tool(
     state: AppState,
     agent: AgentContext,
@@ -224,10 +376,45 @@ async fn call_tool(
             let args: ReadLateRepliesArgs = serde_json::from_value(arguments).map_err(|err| {
                 ApiError::bad_request(format!("invalid read_humen_replies arguments: {err}"))
             })?;
+            collect_federated_replies_for_agent(&state, &agent).await?;
             Ok(Json(mcp_text_result(
                 id,
                 json!({ "replies": db_read_humen_replies(&state, &agent.email, args)? }),
             )))
+        }
+        "list_humen_nodes" => list_humen_nodes(&state, id).await,
+        "search_humen_network" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: NetworkSearchArgs = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid search_humen_network arguments: {err}"))
+            })?;
+            search_humen_network(&state, &agent, id, args).await
+        }
+        "ask_humen_network_async" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: NetworkAskHumanRequest = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid ask_humen_network_async arguments: {err}"))
+            })?;
+            ask_humen_network_async(state, agent, id, args).await
+        }
+        "read_humen_network_ledger" => {
+            let arguments = payload
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let args: ReadNetworkLedgerArgs = serde_json::from_value(arguments).map_err(|err| {
+                ApiError::bad_request(format!("invalid read_humen_network_ledger arguments: {err}"))
+            })?;
+            read_humen_network_ledger(&state, id, args).await
         }
         "list_humen_plugins" => Ok(Json(mcp_text_result(id, state.plugins.plugin_summary()))),
         "create_humen_request_from_template" => {
@@ -292,6 +479,7 @@ async fn call_tool(
                 Some(&agent.agent_name),
                 &args.body,
             )?;
+            let _ = state.events.send(ServerEvent::MemoCreated { memo: memo.clone() });
             Ok(Json(mcp_text_result(
                 id,
                 json!({ "memo": memo, "target_human_email": target }),
@@ -861,6 +1049,62 @@ fn read_humen_replies_schema() -> Value {
                 "type": "boolean",
                 "default": false
             },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 200,
+                "default": 50
+            }
+        }
+    })
+}
+
+fn search_humen_network_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "q": {
+                "type": "string",
+                "description": "Optional text query sent to child nodes."
+            },
+            "tag": {
+                "type": "string",
+                "description": "Optional #tag query sent to child nodes."
+            },
+            "include_local": {
+                "type": "boolean",
+                "default": false,
+                "description": "Also include profiles visible on this local node."
+            }
+        }
+    })
+}
+
+fn ask_humen_network_async_schema() -> Value {
+    let mut schema = ask_humen_async_schema();
+    schema["properties"]["target_node_id"] = json!({
+        "type": "string",
+        "description": "Optional configured federation node id. If omitted, the server chooses by route_tags or request #tags."
+    });
+    schema["properties"]["route_tags"] = json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Optional routing hints matched against configured federation node tags."
+    });
+    schema["properties"]["hop_limit"] = json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 16,
+        "default": 3,
+        "description": "Loop guard carried with the federated request."
+    });
+    schema
+}
+
+fn read_humen_network_ledger_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
             "limit": {
                 "type": "integer",
                 "minimum": 1,

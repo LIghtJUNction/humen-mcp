@@ -3,10 +3,11 @@ async fn admin_weixin_login_start(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<WebhookConfig>, ApiError> {
-    require_admin(&state, &headers)?;
+    let session = require_session(&state, &headers)?;
     let webhook =
         find_webhook(&state, id).ok_or_else(|| ApiError::bad_request("webhook not found"))?;
     ensure_weixin_webhook(&webhook)?;
+    ensure_weixin_webhook_owner(&state, &webhook, &session.user.email)?;
 
     let response = state
         .http
@@ -55,10 +56,11 @@ async fn admin_weixin_login_status(
     Query(query): Query<WeixinLoginStatusQuery>,
     headers: HeaderMap,
 ) -> Result<Json<WebhookConfig>, ApiError> {
-    require_admin(&state, &headers)?;
+    let session = require_session(&state, &headers)?;
     let webhook =
         find_webhook(&state, id).ok_or_else(|| ApiError::bad_request("webhook not found"))?;
     ensure_weixin_webhook(&webhook)?;
+    ensure_weixin_webhook_owner(&state, &webhook, &session.user.email)?;
     let qrcode = normalize_optional_value(webhook.weixin_qrcode.as_deref())
         .ok_or_else(|| ApiError::bad_request("start Weixin scan login first"))?;
     let mut query_params = vec![("qrcode", qrcode)];
@@ -108,7 +110,7 @@ async fn admin_weixin_login_status(
         "confirmed" => {
             webhook.enabled = true;
             webhook.weixin_status = Some("confirmed".to_string());
-            webhook.weixin_status_message = Some("已扫码登录，正在接收微信消息".to_string());
+            webhook.weixin_status_message = Some("已扫码登录，可通过微信回复 MCP 请求".to_string());
             webhook.weixin_bot_token = normalize_optional_value(status.bot_token.as_deref());
             webhook.weixin_account_id = normalize_optional_value(status.ilink_bot_id.as_deref());
             webhook.weixin_user_id = normalize_optional_value(status.ilink_user_id.as_deref());
@@ -147,10 +149,11 @@ async fn admin_weixin_logout(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Json<WebhookConfig>, ApiError> {
-    require_admin(&state, &headers)?;
+    let session = require_session(&state, &headers)?;
     let webhook =
         find_webhook(&state, id).ok_or_else(|| ApiError::bad_request("webhook not found"))?;
     ensure_weixin_webhook(&webhook)?;
+    ensure_weixin_webhook_owner(&state, &webhook, &session.user.email)?;
     let updated = update_webhook_config(&state, id, |webhook| {
         webhook.enabled = false;
         webhook.weixin_qrcode = None;

@@ -1,0 +1,15 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "ask_humen_network_async",
+    "arguments": {
+      "kind": "text",
+      "title": "Remote operator check",
+      "prompt": "Please confirm whether the downstream service dashboard is green. #ops",
+      "route_tags": ["#ops"],
+      "timeout_seconds": 300
+    }
+  }
+}

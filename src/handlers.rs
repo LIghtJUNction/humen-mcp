@@ -93,7 +93,8 @@ fn leaderboard_entries_for_profiles(
         .map(|profile| {
             let stat = stats_by_email.remove(&normalize_email(&profile.email));
             HumanLeaderboardEntry {
-            email: profile.email.clone(),
+                email: profile.email.clone(),
+                platform_name: profile.platform_name.clone(),
                 login: profile.login.clone(),
                 requests_handled: stat.as_ref().map(|stat| stat.requests_handled).unwrap_or(0),
                 sent_tokens: stat.as_ref().map(|stat| stat.sent_tokens).unwrap_or(0),
@@ -103,7 +104,8 @@ fn leaderboard_entries_for_profiles(
                 reputation_breakdown: profile.reputation_breakdown,
                 profile: profile.profile,
                 tags: profile.tags,
-            online: profile.online,
+                online: profile.online,
+                online_sources: profile.online_sources,
             }
         })
         .collect();
@@ -247,6 +249,15 @@ async fn search_users(
     )?))
 }
 
+async fn public_user_profile(
+    State(state): State<AppState>,
+    Path(username): Path<String>,
+) -> Result<Json<PublicUserProfile>, ApiError> {
+    let profile = public_profile_by_platform_name(&state, &username)?
+        .ok_or_else(|| ApiError::bad_request("profile not found"))?;
+    Ok(Json(profile))
+}
+
 async fn list_tags(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -305,24 +316,16 @@ async fn create_agent_ask_me_request(
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<AgentAskMeArgs>,
-) -> Result<Json<AgentHumanMessage>, ApiError> {
+) -> Result<Json<HumanMemo>, ApiError> {
     let session = require_session(&state, &headers)?;
-    if !db_agent_exists(&state, &id)? {
-        return Err(ApiError::bad_request("agent not found"));
-    }
-    let title = normalize_optional_value(Some(payload.title.as_str()))
-        .unwrap_or_else(|| "请问我一个问题".to_string());
-    let prompt = normalize_optional_value(Some(payload.prompt.as_str()))
-        .unwrap_or_else(|| "我在网页面板请求这个 agent 主动询问我。".to_string());
-    let body = format!("{title}\n\n{prompt}");
-    Ok(Json(db_create_agent_human_message(
-        &state,
-        &id,
-        &session.user.email,
-        "human_to_agent",
-        "ask_me",
-        &body,
-    )?))
+    let owner_email = db_agent_owner_email(&state, &id)?;
+    let body = normalize_optional_value(Some(payload.body.as_str()))
+        .or_else(|| normalize_optional_value(Some(payload.prompt.as_str())))
+        .or_else(|| normalize_optional_value(Some(payload.title.as_str())))
+        .ok_or_else(|| ApiError::bad_request("memo body is required"))?;
+    let memo = db_create_agent_owner_memo(&state, &owner_email, &session.user.email, &body)?;
+    let _ = state.events.send(ServerEvent::MemoCreated { memo: memo.clone() });
+    Ok(Json(memo))
 }
 
 async fn rate_agent(
@@ -374,11 +377,23 @@ async fn list_human_memos(
 ) -> Result<Json<Vec<HumanMemo>>, ApiError> {
     let session = require_session(&state, &headers)?;
     let target = resolve_visible_human_memo_target(&state, &session.user.email, &email)?;
+    let memos = db_list_human_memos(&state, &target, 50)?;
     if same_user_identity(&state, &session.user.email, &target) {
         let _ = db_mark_human_memos_read(&state, &target, &session.user.email)?;
     }
-    let memos = db_list_human_memos(&state, &target, 50)?;
     Ok(Json(memos))
+}
+
+async fn unread_human_memos(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Json<HumanMemoUnreadSummary>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    Ok(Json(db_unread_human_memo_summary(
+        &state,
+        &session.user.email,
+        &session.user.email,
+    )?))
 }
 
 async fn create_human_memo(
@@ -390,12 +405,14 @@ async fn create_human_memo(
     let session = require_session(&state, &headers)?;
     let actor = normalize_email(&session.user.email);
     let target = resolve_visible_human_memo_target(&state, &actor, &email)?;
-    Ok(Json(db_create_human_memo(
+    let memo = db_create_human_memo(
         &state,
         &target,
         &actor,
         &payload.body,
-    )?))
+    )?;
+    let _ = state.events.send(ServerEvent::MemoCreated { memo: memo.clone() });
+    Ok(Json(memo))
 }
 
 fn resolve_visible_human_memo_target(
@@ -664,7 +681,7 @@ fn relation_profiles(
     emails: &[String],
     viewer_email: &str,
 ) -> Result<Vec<PublicUserProfile>, ApiError> {
-    let online = online_emails(state);
+    let online = online_presence_sources(state);
     let reputations = db_reputation_map(state)?;
     let users = state
         .users
@@ -763,12 +780,15 @@ async fn admin_add_user(
         .users
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
-    users.users.entry(email.clone()).or_insert_with(|| {
-        let mut record = new_user_record(email.clone(), now, payload.profile);
-        record.last_login_at = 0;
-        record.tags = normalize_tags(payload.tags);
-        record
-    });
+    let mut record = new_user_record(email.clone(), now, payload.profile);
+    record.last_login_at = 0;
+    record.tags = normalize_tags(payload.tags);
+    prepare_user_record(&mut record);
+    let key = user_record_key(&record);
+    if users.users.contains_key(&key) {
+        return Err(ApiError::conflict("platform name is already in use"));
+    }
+    users.users.insert(key, record);
     users
         .save(&state.config.users_file)
         .map_err(|err| ApiError::internal(format!("failed to save user: {err}")))?;
@@ -966,54 +986,4 @@ fn answer_request_internal(
         answer,
         answered_late: late,
     })
-}
-
-fn create_incoming_request(
-    state: &AppState,
-    incoming: &IncomingMessage,
-    assigned_to: Option<String>,
-) -> HumanRequest {
-    let now = now_unix();
-    let sender = incoming.sender.trim();
-    let title = if sender.is_empty() {
-        "微信消息".to_string()
-    } else {
-        format!("微信消息：{sender}")
-    };
-    let prompt = if incoming.content.trim().is_empty() {
-        serde_json::to_string_pretty(&incoming.raw)
-            .unwrap_or_else(|_| "收到一条微信消息".to_string())
-    } else {
-        incoming.content.clone()
-    };
-    let request = HumanRequest {
-        id: Uuid::new_v4(),
-        kind: TaskKind::Text,
-        title,
-        prompt,
-        choices: Vec::new(),
-        image_url: None,
-        image_base64: None,
-        image_mime_type: None,
-        steps: vec!["回复或处理这条来自个人微信 IM 的消息。".to_string()],
-        created_at: now,
-        timeout_seconds: 86400,
-        expires_at: now.saturating_add(86400),
-        tags: vec![
-            "#wechat".to_string(),
-            "#weixin".to_string(),
-            "#webhook".to_string(),
-        ],
-        assigned_to: assigned_to.map(|email| normalize_email(&email)),
-        created_by: None,
-        created_by_agent_id: None,
-    };
-    if let Err(err) = db_insert_request(state, &request) {
-        warn!(request_id = %request.id, error = %err.message, "failed to persist incoming request");
-    }
-    state.requests.insert(request.id, request.clone());
-    let _ = state.events.send(ServerEvent::RequestCreated {
-        request: request.clone(),
-    });
-    request
 }

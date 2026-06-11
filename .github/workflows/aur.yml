@@ -153,9 +153,16 @@ jobs:
 
           asset_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/humen-mcp-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
           checksum="$(curl -fsSL "${asset_url}" | sha256sum | awk '{print $1}')"
+          current_pkgver="$(sed -nE 's/^pkgver=([^[:space:]]+)/\1/p' aur/humen-mcp-bin/PKGBUILD | head -n1)"
+          current_pkgrel="$(sed -nE 's/^pkgrel=([0-9]+)/\1/p' aur/humen-mcp-bin/PKGBUILD | head -n1)"
+          if [[ "${current_pkgver}" == "${VERSION}" && "${current_pkgrel}" =~ ^[0-9]+$ ]]; then
+            pkgrel="$((current_pkgrel + 1))"
+          else
+            pkgrel=1
+          fi
 
           sed -i -E "s/^pkgver=.*/pkgver=${VERSION}/" aur/humen-mcp-bin/PKGBUILD
-          sed -i -E "s/^pkgrel=.*/pkgrel=1/" aur/humen-mcp-bin/PKGBUILD
+          sed -i -E "s/^pkgrel=.*/pkgrel=${pkgrel}/" aur/humen-mcp-bin/PKGBUILD
           sed -i -E "s/^sha256sums=\('.*'\)/sha256sums=('${checksum}')/" aur/humen-mcp-bin/PKGBUILD
 
       - name: Prepare humen-mcp-git package

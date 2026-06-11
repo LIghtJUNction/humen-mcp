@@ -21,6 +21,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/mcp", get(mcp_get).post(mcp))
+        .route("/mcp/", get(web_panel_legacy_redirect))
         .nest("/api", api_router())
         .nest("/mcp/api", api_router())
         .nest_service("/mcp/assets", ServeDir::new(format!("{web_dist}/assets")))
@@ -51,6 +52,10 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn web_panel_legacy_redirect() -> Redirect {
+    Redirect::permanent("/")
+}
+
 fn api_router() -> Router<AppState> {
     Router::new()
         .route("/auth/config", get(auth_config))
@@ -64,6 +69,7 @@ fn api_router() -> Router<AppState> {
         .route("/auth/oauth/github/start", get(github_oauth_start))
         .route("/auth/oauth/github/callback", get(github_oauth_callback))
         .route("/public/leaderboard", get(list_public_leaderboard))
+        .route("/public/users/{username}", get(public_user_profile))
         .route("/me", get(me))
         .route("/me/profile", get(me_profile).post(update_me_profile))
         .route("/passkeys", get(list_passkeys))
@@ -113,6 +119,7 @@ fn api_router() -> Router<AppState> {
         .route("/agents/{id}/accept", post(accept_agent_friend_request))
         .route("/agents/{id}/ask-me", post(create_agent_ask_me_request))
         .route("/agents/{id}/rate", post(rate_agent))
+        .route("/memos/unread", get(unread_human_memos))
         .route(
             "/humans/{email}/memos",
             get(list_human_memos).post(create_human_memo),
@@ -196,7 +203,7 @@ fn prompt(label: &str) -> anyhow::Result<String> {
 fn default_env_lines() -> Vec<String> {
     [
         "HUMEN_BIND=127.0.0.1:8787",
-        "HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp",
+        "HUMEN_PUBLIC_BASE_URL=https://your-domain.example",
         "HUMEN_WEB_DIST=/usr/share/humen-mcp/web",
         "HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json",
         "HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3",
@@ -232,11 +239,15 @@ fn set_env_value(lines: &mut Vec<String>, key: &str, value: &str) {
 async fn healthz() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
-async fn mcp_get() -> Response {
-    (
-        StatusCode::METHOD_NOT_ALLOWED,
-        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-        "humen-mcp JSON-RPC endpoint. Use POST /mcp with application/json.\n",
-    )
-        .into_response()
+async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
+    if !mcp_accepts_sse(&headers) {
+        return Ok((
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "humen-mcp JSON-RPC endpoint. Use POST /mcp with application/json, or GET /mcp with Accept: text/event-stream for notifications.\n",
+        )
+            .into_response());
+    }
+    let agent = require_agent_access(&state, &headers)?;
+    Ok(mcp_sse(state, agent).into_response())
 }

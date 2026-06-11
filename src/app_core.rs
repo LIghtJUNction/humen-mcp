@@ -95,6 +95,12 @@ struct Config {
 
     #[arg(long, env = "HUMEN_PLUGIN_DIR", default_value = "")]
     plugin_dir: String,
+
+    #[arg(long, env = "HUMEN_NODE_ID", default_value = "local")]
+    node_id: String,
+
+    #[arg(long, env = "HUMEN_FEDERATION_FILE", default_value = "")]
+    federation_file: String,
 }
 
 #[derive(Clone)]
@@ -110,9 +116,11 @@ struct AppState {
     admin_settings: Arc<Mutex<AdminSettings>>,
     db: Arc<Mutex<Connection>>,
     events: broadcast::Sender<ServerEvent>,
+    mcp_streams: Arc<DashMap<String, Uuid>>,
     shutdown: broadcast::Sender<()>,
     self_update_running: Arc<AtomicBool>,
     plugins: Arc<PluginRegistry>,
+    federation: Arc<FederationRegistry>,
     http: Client,
     webauthn: Option<Arc<Webauthn>>,
 }
@@ -130,6 +138,7 @@ impl AppState {
         let admin_settings = users.admin_settings.clone();
         let db = open_db(&config.db_file)?;
         let plugins = load_plugins(config.plugin_dir.trim());
+        let federation = load_federation(config.federation_file.trim())?;
         let webauthn = match build_webauthn(&config.public_base_url) {
             Ok(webauthn) => Some(Arc::new(webauthn)),
             Err(err) => {
@@ -149,9 +158,11 @@ impl AppState {
             admin_settings: Arc::new(Mutex::new(admin_settings)),
             db: Arc::new(Mutex::new(db)),
             events,
+            mcp_streams: Arc::new(DashMap::new()),
             shutdown,
             self_update_running: Arc::new(AtomicBool::new(false)),
             plugins: Arc::new(plugins),
+            federation: Arc::new(federation),
             http: Client::new(),
             webauthn,
         };

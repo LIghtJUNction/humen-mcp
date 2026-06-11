@@ -106,6 +106,32 @@ fn weixin_message_is_from_bot(raw: &Value, webhook: &WebhookConfig) -> bool {
     weixin_message_user_id(raw).is_some_and(|sender| normalize_email(&sender) == normalize_email(&account_id))
 }
 
+fn handle_weixin_incoming_message(state: &AppState, webhook: &WebhookConfig, message: &Value) {
+    if weixin_message_is_from_bot(message, webhook) {
+        return;
+    }
+    let incoming = parse_weixin_message(message.clone());
+    match answer_weixin_message(state, webhook, &incoming) {
+        Ok(Some(answered)) => {
+            dispatch_webhooks(
+                state,
+                "message_answered",
+                "wechat",
+                &answered.request,
+                Some(message.clone()),
+            );
+        }
+        Ok(None) => {}
+        Err(err) => {
+            warn!(
+                webhook_id = %webhook.id,
+                error = %err.message,
+                "Weixin reply could not be applied as an answer"
+            );
+        }
+    }
+}
+
 fn find_webhook(state: &AppState, id: Uuid) -> Option<WebhookConfig> {
     state
         .admin_settings
@@ -158,6 +184,25 @@ fn ensure_weixin_webhook(webhook: &WebhookConfig) -> Result<(), ApiError> {
         Ok(())
     } else {
         Err(ApiError::bad_request("webhook is not a Weixin integration"))
+    }
+}
+
+fn ensure_weixin_webhook_owner(
+    state: &AppState,
+    webhook: &WebhookConfig,
+    session_email: &str,
+) -> Result<(), ApiError> {
+    let Some(assigned_to) = normalize_optional_value(webhook.assigned_to.as_deref()) else {
+        return Err(ApiError::bad_request(
+            "Weixin integration must be bound to your own human account first",
+        ));
+    };
+    if same_user_identity(state, &assigned_to, session_email) {
+        Ok(())
+    } else {
+        Err(ApiError::unauthorized(
+            "Weixin integration belongs to another user",
+        ))
     }
 }
 
@@ -287,10 +332,9 @@ fn dispatch_webhooks(
     }
 }
 
-fn webhook_target_email(state: &AppState, webhook: &WebhookConfig) -> String {
+fn webhook_target_email(_state: &AppState, webhook: &WebhookConfig) -> Option<String> {
     normalize_optional_value(webhook.assigned_to.as_deref())
         .map(|email| normalize_email(&email))
-        .unwrap_or_else(|| normalize_email(&state.config.admin_email))
 }
 
 fn webhook_has_explicit_target(webhook: &WebhookConfig) -> bool {
@@ -306,9 +350,11 @@ fn webhook_receives_request(
     webhook: &WebhookConfig,
     request: &HumanRequest,
 ) -> bool {
-    request_assigned_to_email(request).is_some_and(|assigned_to| {
-        same_user_identity(state, &assigned_to, &webhook_target_email(state, webhook))
-    })
+    let Some(target_email) = webhook_target_email(state, webhook) else {
+        return false;
+    };
+    request_assigned_to_email(request)
+        .is_some_and(|assigned_to| same_user_identity(state, &assigned_to, &target_email))
 }
 
 async fn send_weixin_request_notification(
@@ -392,7 +438,7 @@ async fn send_weixin_request_notification(
     }
     update_webhook_config(&state, webhook.id, |stored| {
         stored.weixin_status = Some("confirmed".to_string());
-        stored.weixin_status_message = Some("已发送 MCP 请求通知到微信".to_string());
+        stored.weixin_status_message = Some("已发送 MCP 请求到微信".to_string());
         stored.weixin_last_request_id = Some(request.id);
         stored.weixin_last_error = None;
     })?;
@@ -488,7 +534,11 @@ fn answer_weixin_message(
     let Some(request_id) = resolve_weixin_answer_target(state, webhook, incoming)? else {
         return Ok(None);
     };
-    let target_email = webhook_target_email(state, webhook);
+    let Some(target_email) = webhook_target_email(state, webhook) else {
+        return Err(ApiError::bad_request(
+            "Weixin integration has no human account binding",
+        ));
+    };
     if !is_answerable_request_for(state, request_id, &target_email)? {
         return Ok(None);
     }
@@ -508,11 +558,12 @@ fn resolve_weixin_answer_target(
 ) -> Result<Option<Uuid>, ApiError> {
     let mut strings = vec![incoming.content.as_str()];
     collect_json_strings(&incoming.raw, &mut strings);
+    let Some(target_email) = webhook_target_email(state, webhook) else {
+        return Ok(None);
+    };
     if let Some(id) = strings.iter().find_map(|text| find_uuid_in_text(text)) {
-        let target_email = webhook_target_email(state, webhook);
         return Ok(is_answerable_request_for(state, id, &target_email)?.then_some(id));
     }
-    let target_email = webhook_target_email(state, webhook);
     let candidates = candidate_answer_requests(state, &target_email);
     for text in &strings {
         let text = text.to_ascii_lowercase();
@@ -634,6 +685,7 @@ async fn weixin_poll_loop(state: AppState) {
                     .filter(|webhook| {
                         webhook.enabled
                             && normalize_webhook_kind(&webhook.kind) == "wechat"
+                            && webhook_target_email(&state, webhook).is_some()
                             && normalize_optional_value(webhook.weixin_bot_token.as_deref())
                                 .is_some()
                     })
@@ -757,48 +809,7 @@ async fn poll_weixin_updates_once(state: AppState, webhook: WebhookConfig) -> Re
     for message in &messages {
         latest_context_token = weixin_message_context_token(message).or(latest_context_token);
         latest_user_id = weixin_message_user_id(message).or(latest_user_id);
-        if weixin_message_is_from_bot(message, &webhook) {
-            continue;
-        }
-        let incoming = parse_weixin_message(message.clone());
-        match answer_weixin_message(&state, &webhook, &incoming) {
-            Ok(Some(answered)) => {
-                dispatch_webhooks(
-                    &state,
-                    "message_answered",
-                    "wechat",
-                    &answered.request,
-                    Some(message.clone()),
-                );
-            }
-            Ok(None) => {
-                let target_email = webhook_target_email(&state, &webhook);
-                let request = create_incoming_request(&state, &incoming, Some(target_email));
-                dispatch_webhooks(
-                    &state,
-                    "message_received",
-                    "wechat",
-                    &request,
-                    Some(message.clone()),
-                );
-            }
-            Err(err) => {
-                warn!(
-                    webhook_id = %webhook.id,
-                    error = %err.message,
-                    "Weixin reply could not be applied as an answer"
-                );
-                let target_email = webhook_target_email(&state, &webhook);
-                let request = create_incoming_request(&state, &incoming, Some(target_email));
-                dispatch_webhooks(
-                    &state,
-                    "message_received",
-                    "wechat",
-                    &request,
-                    Some(message.clone()),
-                );
-            }
-        }
+        handle_weixin_incoming_message(&state, &webhook, message);
     }
 
     let next_buf = raw
@@ -824,7 +835,7 @@ async fn poll_weixin_updates_once(state: AppState, webhook: WebhookConfig) -> Re
             stored.weixin_user_id = Some(user_id);
         }
         stored.weixin_status = Some("confirmed".to_string());
-        stored.weixin_status_message = Some("已扫码登录，正在接收微信消息".to_string());
+        stored.weixin_status_message = Some("已扫码登录，可通过微信回复 MCP 请求".to_string());
         if stored
             .weixin_last_error
             .as_deref()

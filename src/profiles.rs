@@ -86,6 +86,11 @@ fn upsert_github_user(
 ) -> Result<String, ApiError> {
     validate_email_like_identifier(email)?;
     let login = login.and_then(|value| normalize_optional_value(Some(value)));
+    let platform_name = login
+        .as_deref()
+        .and_then(normalize_platform_name)
+        .or_else(|| normalize_platform_name(email))
+        .ok_or_else(|| ApiError::bad_request("valid platform name is required"))?;
     let legacy_email_key = normalize_email(email);
     let legacy_login_key = login.as_deref().map(normalize_email);
     let admin_email = normalize_email(&state.config.admin_email);
@@ -117,6 +122,9 @@ fn upsert_github_user(
 
     if let Some(existing_key) = existing_key {
         if existing_key != account_key {
+            if users.users.contains_key(&account_key) {
+                return Err(ApiError::conflict("platform name is already in use"));
+            }
             if let Some(record) = users.users.remove(&existing_key) {
                 users.users.insert(account_key.clone(), record);
             }
@@ -126,8 +134,16 @@ fn upsert_github_user(
             .get_mut(&account_key)
             .ok_or_else(|| ApiError::internal("failed to migrate GitHub user"))?;
         prepare_user_record(record);
+        if record
+            .github_id
+            .as_deref()
+            .is_some_and(|existing_github_id| existing_github_id != github_id.trim())
+        {
+            return Err(ApiError::conflict("platform name is already in use"));
+        }
         record.github_id = Some(github_id.trim().to_string());
         record.login = login;
+        record.platform_name = platform_name;
         record.email = normalize_email(email);
         record.last_login_at = now;
     } else {
@@ -142,6 +158,8 @@ fn upsert_github_user(
         let mut record = new_user_record(email.to_string(), now, String::new());
         record.github_id = Some(github_id.trim().to_string());
         record.login = login;
+        record.platform_name = platform_name;
+        prepare_user_record(&mut record);
         users.users.insert(account_key.clone(), record);
     }
     users
@@ -155,7 +173,7 @@ fn user_profiles(
     query: Option<&str>,
     tag: Option<&str>,
 ) -> Result<Vec<PublicUserProfile>, ApiError> {
-    let online = online_emails(state);
+    let online = online_presence_sources(state);
     let reputations = db_reputation_map(state)?;
     let users = state
         .users
@@ -212,7 +230,7 @@ fn visible_user_profiles_for_session(
     if viewer_email == normalize_email(&state.config.admin_email) {
         return user_profiles(state, query, tag);
     }
-    let online = online_emails(state);
+    let online = online_presence_sources(state);
     let reputations = db_reputation_map(state)?;
     let users = state
         .users
@@ -270,7 +288,7 @@ fn agent_visible_profiles(
     query: Option<&str>,
     tag: Option<&str>,
 ) -> Result<Vec<PublicUserProfile>, ApiError> {
-    let online = online_emails(state);
+    let online = online_presence_sources(state);
     let reputations = db_reputation_map(state)?;
     let users = state
         .users
@@ -422,6 +440,51 @@ fn agent_visible_tag_counts(
     tag_counts_from_profiles(agent_visible_profiles(state, agent, None, None)?)
 }
 
+fn public_profile_by_platform_name(
+    state: &AppState,
+    platform_name: &str,
+) -> Result<Option<PublicUserProfile>, ApiError> {
+    let Some(platform_name) = normalize_platform_name(platform_name) else {
+        return Ok(None);
+    };
+    let record = {
+        let users = state
+            .users
+            .lock()
+            .map_err(|_| ApiError::internal("user store lock poisoned"))?;
+        users
+            .users
+            .values()
+            .find(|record| {
+                normalize_platform_name(&platform_name_for_record(record))
+                    .is_some_and(|candidate| candidate == platform_name)
+            })
+            .cloned()
+    };
+    let Some(record) = record else {
+        return Ok(None);
+    };
+    let online = online_presence_sources(state);
+    let admin_email = normalize_email(&state.config.admin_email);
+    let reputation =
+        db_reputation_summary_for(state, &profile_user_key(&record, &admin_email)).unwrap_or_default();
+    let mut profile = public_profile_from_record_with_online_and_reputation(
+        &record,
+        &admin_email,
+        &online,
+        reputation,
+    );
+    if profile.visibility != ProfileVisibility::Public {
+        profile.profile.clear();
+        profile.tags.clear();
+        profile.friend_code.clear();
+        profile.intro_code.clear();
+        profile.online = false;
+        profile.online_sources.clear();
+    }
+    Ok(Some(profile))
+}
+
 fn tag_counts_from_profiles(profiles: Vec<PublicUserProfile>) -> Result<Vec<Value>, ApiError> {
     let mut counts: HashMap<String, usize> = HashMap::new();
     for profile in profiles {
@@ -446,10 +509,18 @@ fn get_or_create_user_record(state: &AppState, email: &str) -> Result<UserRecord
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
     let now = now_unix();
+    let admin_email = normalize_email(&state.config.admin_email);
+    let key = canonical_user_key_from_identifier(&users, &email, &admin_email).unwrap_or_else(|| {
+        let mut record = new_user_record(email.clone(), now, default_profile_template(&email));
+        prepare_user_record(&mut record);
+        let key = user_record_key(&record);
+        users.users.insert(key.clone(), record);
+        key
+    });
     let record = users
         .users
-        .entry(email.clone())
-        .or_insert_with(|| new_user_record(email.clone(), now, default_profile_template(&email)));
+        .get_mut(&key)
+        .ok_or_else(|| ApiError::internal("failed to create user profile"))?;
     prepare_user_record(record);
     let record = record.clone();
     users
@@ -468,10 +539,18 @@ fn ensure_user_agent_fields(
         .lock()
         .map_err(|_| ApiError::internal("user store lock poisoned"))?;
     let now = now_unix();
+    let admin_email = normalize_email(&state.config.admin_email);
+    let key = canonical_user_key_from_identifier(&users, &email, &admin_email).unwrap_or_else(|| {
+        let mut record = new_user_record(email.clone(), now, default_profile_template(&email));
+        prepare_user_record(&mut record);
+        let key = user_record_key(&record);
+        users.users.insert(key.clone(), record);
+        key
+    });
     let record = users
         .users
-        .entry(email.clone())
-        .or_insert_with(|| new_user_record(email.clone(), now, default_profile_template(&email)));
+        .get_mut(&key)
+        .ok_or_else(|| ApiError::internal("failed to create user agent fields"))?;
     prepare_user_record(record);
     let suffix = record.agent_secret.clone().unwrap_or_default();
     let intro_code = record.intro_code.clone();
@@ -484,7 +563,7 @@ fn ensure_user_agent_fields(
 }
 
 fn public_profile_from_record(state: &AppState, record: &UserRecord) -> PublicUserProfile {
-    let online = online_emails(state);
+    let online = online_presence_sources(state);
     let admin_email = normalize_email(&state.config.admin_email);
     let reputation =
         db_reputation_summary_for(state, &profile_user_key(record, &admin_email)).unwrap_or_default();
@@ -499,7 +578,7 @@ fn public_profile_from_record(state: &AppState, record: &UserRecord) -> PublicUs
 fn public_profile_from_record_with_online_and_reputation(
     record: &UserRecord,
     admin_email: &str,
-    online: &HashMap<String, usize>,
+    online: &HashMap<String, HashSet<OnlineSource>>,
     reputation: ReputationSummary,
 ) -> PublicUserProfile {
     let email = normalize_email(&record.email);
@@ -517,6 +596,7 @@ fn public_profile_from_record_with_online_and_reputation(
     };
     PublicUserProfile {
         email: account_key.clone(),
+        platform_name: platform_name_for_record(record),
         login: record.login.clone(),
         provider,
         profile: record.profile.clone(),
@@ -532,7 +612,8 @@ fn public_profile_from_record_with_online_and_reputation(
         friend_request_sent: false,
         friend_request_received: false,
         onboarding_completed: record.onboarding_completed,
-        online: online.contains_key(&online_identity_key(record)),
+        online: !profile_online_sources(record, admin_email, online).is_empty(),
+        online_sources: profile_online_sources(record, admin_email, online),
         last_login_at: record.last_login_at,
         last_seen_at: user_record_last_seen_at(record),
         ban_expires_at: if is_admin {
@@ -546,7 +627,7 @@ fn public_profile_from_record_with_online_and_reputation(
 fn public_profile_from_record_for_viewer(
     record: &UserRecord,
     admin_email: &str,
-    online: &HashMap<String, usize>,
+    online: &HashMap<String, HashSet<OnlineSource>>,
     reputation: ReputationSummary,
     viewer_email: &str,
     viewer_friends: &[String],
@@ -582,14 +663,40 @@ fn public_tags_for_record(record: &UserRecord, is_admin: bool) -> Vec<String> {
     tags
 }
 
+fn profile_online_sources(
+    record: &UserRecord,
+    admin_email: &str,
+    online: &HashMap<String, HashSet<OnlineSource>>,
+) -> Vec<OnlineSource> {
+    let mut sources = HashSet::new();
+    for key in [
+        online_identity_key(record),
+        profile_user_key(record, admin_email),
+        canonical_user_key_from_record(record),
+        normalize_email(&record.email),
+    ] {
+        if let Some(values) = online.get(&key) {
+            sources.extend(values.iter().copied());
+        }
+    }
+    let mut sources: Vec<_> = sources.into_iter().collect();
+    sources.sort_by_key(|source| match source {
+        OnlineSource::Wechat => 0,
+        OnlineSource::Web => 1,
+    });
+    sources
+}
+
 fn synthetic_admin_profile(
     state: &AppState,
-    online: &HashMap<String, usize>,
+    online: &HashMap<String, HashSet<OnlineSource>>,
     admin_email: &str,
     reputation: ReputationSummary,
 ) -> PublicUserProfile {
     PublicUserProfile {
         email: state.config.admin_email.clone(),
+        platform_name: normalize_platform_name(&state.config.admin_email)
+            .unwrap_or_else(|| "admin".to_string()),
         login: None,
         provider: AuthProvider::Password,
         profile: "Administrator".to_string(),
@@ -606,6 +713,10 @@ fn synthetic_admin_profile(
         friend_request_received: false,
         onboarding_completed: true,
         online: online.contains_key(admin_email),
+        online_sources: online
+            .get(admin_email)
+            .map(|sources| sources.iter().copied().collect())
+            .unwrap_or_default(),
         last_login_at: 0,
         last_seen_at: 0,
         ban_expires_at: None,
@@ -635,6 +746,11 @@ fn reputation_for(
 fn profile_matches(profile: &PublicUserProfile, query: Option<&str>, tag: Option<&str>) -> bool {
     let query_matches = query.is_none_or(|query| {
         profile.email.to_ascii_lowercase().contains(query)
+            || profile.platform_name.to_ascii_lowercase().contains(query)
+            || profile
+                .login
+                .as_deref()
+                .is_some_and(|login| login.to_ascii_lowercase().contains(query))
             || profile.profile.to_ascii_lowercase().contains(query)
             || profile
                 .tags
@@ -671,6 +787,81 @@ fn persist_admin_settings(state: &AppState, settings: &AdminSettings) -> Result<
     users
         .save(&state.config.users_file)
         .map_err(|err| ApiError::internal(format!("failed to save admin settings: {err}")))
+}
+
+fn webhooks_visible_to_session(
+    state: &AppState,
+    session_email: &str,
+    is_admin: bool,
+    webhooks: &[WebhookConfig],
+) -> Vec<WebhookConfig> {
+    webhooks
+        .iter()
+        .filter(|webhook| webhook_manageable_by_session(state, session_email, is_admin, webhook))
+        .cloned()
+        .collect()
+}
+
+fn merge_webhooks_for_session(
+    state: &AppState,
+    session_email: &str,
+    is_admin: bool,
+    mut current: AdminSettings,
+    incoming: Vec<WebhookConfig>,
+) -> Result<AdminSettings, ApiError> {
+    let mut incoming_settings = current.clone();
+    incoming_settings.webhooks = incoming;
+    let incoming = sanitize_admin_settings(incoming_settings).webhooks;
+    for webhook in &incoming {
+        validate_webhook_for_session(state, session_email, is_admin, webhook)?;
+    }
+    current.webhooks.retain(|webhook| {
+        !webhook_manageable_by_session(state, session_email, is_admin, webhook)
+    });
+    current.webhooks.extend(incoming);
+    Ok(sanitize_admin_settings(current))
+}
+
+fn validate_webhook_for_session(
+    state: &AppState,
+    session_email: &str,
+    is_admin: bool,
+    webhook: &WebhookConfig,
+) -> Result<(), ApiError> {
+    if normalize_webhook_kind(&webhook.kind) == "wechat" {
+        let Some(assigned_to) = normalize_optional_value(webhook.assigned_to.as_deref()) else {
+            return Err(ApiError::bad_request(
+                "WeChat integration must be bound to your own human account",
+            ));
+        };
+        if !same_user_identity(state, &assigned_to, session_email) {
+            return Err(ApiError::bad_request(
+                "WeChat integration must be bound to your own human account",
+            ));
+        }
+        return Ok(());
+    }
+    if !is_admin {
+        return Err(ApiError::unauthorized(
+            "generic webhooks require administrator access",
+        ));
+    }
+    Ok(())
+}
+
+fn webhook_manageable_by_session(
+    state: &AppState,
+    session_email: &str,
+    is_admin: bool,
+    webhook: &WebhookConfig,
+) -> bool {
+    if normalize_webhook_kind(&webhook.kind) != "wechat" {
+        return is_admin;
+    }
+    webhook
+        .assigned_to
+        .as_deref()
+        .is_some_and(|assigned_to| same_user_identity(state, assigned_to, session_email))
 }
 
 fn oauth_channel_enabled(settings: &AdminSettings, provider: &str) -> bool {

@@ -50,9 +50,48 @@ sequenceDiagram
     S->>A: request_id
     S->>H: request_created
     H->>S: answer
+    S-->>A: notifications/humen/reply_available
     A->>S: read_humen_replies
     S->>A: replies
 ```
+
+异步 MCP 客户端优先通过 `GET /mcp` 和 `Accept: text/event-stream` 打开通知流，
+认证仍使用同一个 agent secret header。人类回复可用时，服务端发送
+`notifications/humen/reply_available` JSON-RPC 通知；通知只携带 `request_id`
+和 `read_humen_replies` 工具提示，完整回答仍通过 `read_humen_replies` 读取。
+如果客户端或代理不支持 SSE，继续用 `read_humen_replies` 轮询作为 fallback。
+
+## humen-mcp 网络
+
+一个实例可以作为树根或分支节点，通过 `HUMEN_FEDERATION_FILE` 声明下游 `humen-mcp` 节点。节点配置只在本机读取，`list_humen_nodes` 只返回节点摘要，不返回 `agent_secret`。
+
+```mermaid
+flowchart TD
+    A[Agent] --> R[root humen-mcp]
+    R --> B[branch humen-mcp]
+    R --> C[branch humen-mcp]
+    C --> D[leaf humen-mcp]
+```
+
+第一版联邦请求是异步闭环：
+
+1. Agent 调根节点 `ask_humen_network_async`。
+2. 根节点按 `target_node_id`、`route_tags` 或请求正文中的 `#tag` 选择下游节点。
+3. 根节点作为 MCP client 调下游节点的 `/mcp` 和 `ask_humen_async`，并在本地记录 `local_request_id` 到 `remote_request_id` 的映射。
+4. Agent 后续调根节点 `read_humen_replies`；根节点先轮询下游节点的 `read_humen_replies`，拿到回答后写回本地回复邮箱。
+5. Agent 只看到根节点返回的本地 `request_id` 和最终回答，不需要直接连接下游节点。
+
+每条边使用独立的下游 agent secret。跨节点请求保存 `path` 和 `hop_limit`，用于后续多跳扩展和循环检测。当前实现优先支持根到直接下游节点的异步转发；分支节点可以用同一配置继续作为另一个根来管理自己的下游。
+
+### 联邦账本
+
+这里借鉴的是区块链的审计形状，不是共识、挖矿或代币。每个节点都会在 SQLite 里维护本地 append-only 的 `federation_ledger` 哈希链：
+
+- `federated_request_created`：本地请求映射到下游远端 `request_id`。
+- `federated_reply_collected`：下游回答被写回本地回复邮箱。
+- `federated_request_expired` 或 `federated_request_failed`：路由未完成。
+
+每条账本记录都保存 `previous_hash`、`event_hash`、`event_type`、`subject_id` 和事件 JSON。`event_hash` 会把上一条 hash、节点 id、事件类型、主题 id、时间戳和载荷一起哈希，因此本地历史具备可篡改感知。可以通过 `read_humen_network_ledger` 查看最近账本条目和链头；`list_humen_nodes` 也会返回当前本地账本链头。
 
 ## 插件系统
 

@@ -239,10 +239,18 @@ async fn update_me_profile(
             .lock()
             .map_err(|_| ApiError::internal("user store lock poisoned"))?;
         let now = now_unix();
+        let admin_email = normalize_email(&state.config.admin_email);
+        let key = canonical_user_key_from_identifier(&users, &email, &admin_email).unwrap_or_else(|| {
+            let mut record = new_user_record(email.clone(), now, String::new());
+            prepare_user_record(&mut record);
+            let key = user_record_key(&record);
+            users.users.insert(key.clone(), record);
+            key
+        });
         let record = users
             .users
-            .entry(email.clone())
-            .or_insert_with(|| new_user_record(email.clone(), now, String::new()));
+            .get_mut(&key)
+            .ok_or_else(|| ApiError::internal("failed to create user profile"))?;
         prepare_user_record(record);
         record.profile = payload.profile;
         record.tags = normalize_tags(payload.tags);
@@ -320,16 +328,23 @@ async fn update_agent_secret(
             .lock()
             .map_err(|_| ApiError::internal("user store lock poisoned"))?;
         let now = now_unix();
+        let session_email = normalize_email(&session.user.email);
+        let admin_email = normalize_email(&state.config.admin_email);
+        let key = canonical_user_key_from_identifier(&users, &session_email, &admin_email).unwrap_or_else(|| {
+            let mut record = new_user_record(
+                session.user.email.clone(),
+                now,
+                default_profile_template(&session.user.email),
+            );
+            prepare_user_record(&mut record);
+            let key = user_record_key(&record);
+            users.users.insert(key.clone(), record);
+            key
+        });
         let record = users
             .users
-            .entry(normalize_email(&session.user.email))
-            .or_insert_with(|| {
-                new_user_record(
-                    session.user.email.clone(),
-                    now,
-                    default_profile_template(&session.user.email),
-                )
-            });
+            .get_mut(&key)
+            .ok_or_else(|| ApiError::internal("failed to create user agent secret"))?;
         prepare_user_record(record);
         record.agent_secret = Some(suffix);
         users
@@ -343,13 +358,19 @@ async fn admin_webhooks(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Json<Vec<WebhookConfig>>, ApiError> {
-    require_admin(&state, &headers)?;
+    let session = require_session(&state, &headers)?;
+    let is_admin = normalize_email(&session.user.email) == normalize_email(&state.config.admin_email);
     let settings = state
         .admin_settings
         .lock()
         .map_err(|_| ApiError::internal("settings lock poisoned"))?
         .clone();
-    Ok(Json(settings.webhooks))
+    Ok(Json(webhooks_visible_to_session(
+        &state,
+        &session.user.email,
+        is_admin,
+        &settings.webhooks,
+    )))
 }
 
 async fn admin_update_webhooks(
@@ -357,14 +378,20 @@ async fn admin_update_webhooks(
     headers: HeaderMap,
     Json(payload): Json<WebhooksUpdate>,
 ) -> Result<Json<Vec<WebhookConfig>>, ApiError> {
-    require_admin(&state, &headers)?;
-    let mut settings = state
+    let session = require_session(&state, &headers)?;
+    let is_admin = normalize_email(&session.user.email) == normalize_email(&state.config.admin_email);
+    let current = state
         .admin_settings
         .lock()
         .map_err(|_| ApiError::internal("settings lock poisoned"))?
         .clone();
-    settings.webhooks = payload.webhooks;
-    let sanitized = sanitize_admin_settings(settings);
+    let sanitized = merge_webhooks_for_session(
+        &state,
+        &session.user.email,
+        is_admin,
+        current,
+        payload.webhooks,
+    )?;
     {
         let mut stored = state
             .admin_settings
@@ -373,5 +400,10 @@ async fn admin_update_webhooks(
         *stored = sanitized.clone();
     }
     persist_admin_settings(&state, &sanitized)?;
-    Ok(Json(sanitized.webhooks))
+    Ok(Json(webhooks_visible_to_session(
+        &state,
+        &session.user.email,
+        is_admin,
+        &sanitized.webhooks,
+    )))
 }

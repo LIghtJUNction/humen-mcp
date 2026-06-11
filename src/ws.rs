@@ -100,7 +100,7 @@ fn broadcast_presence_changed(state: &AppState) {
 }
 
 fn online_user_count(state: &AppState) -> usize {
-    online_emails(state).len()
+    online_presence_sources(state).len()
 }
 
 fn can_access_request(state: &AppState, email: &str, request: &HumanRequest) -> bool {
@@ -117,6 +117,7 @@ fn can_receive_event(state: &AppState, email: &str, event: &ServerEvent) -> bool
         ServerEvent::RequestExpired {
             expired_request, ..
         } => can_access_request(state, email, &expired_request.request),
+        ServerEvent::MemoCreated { memo } => same_user_identity(state, &memo.target_email, email),
         ServerEvent::TaskCreated { task } | ServerEvent::TaskUpdated { task } => {
             same_user_identity(state, &task.assigned_to, email)
         }

@@ -32,7 +32,7 @@ enum TaskKind {
     Steps,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct CreateHumanRequest {
     #[serde(default)]
     kind: TaskKind,
@@ -61,6 +61,127 @@ struct CreateHumanRequest {
     target_human_email: Option<String>,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct FederationRegistry {
+    #[serde(default)]
+    nodes: Vec<FederationNode>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FederationNode {
+    node_id: String,
+    endpoint: String,
+    agent_secret: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default = "default_federation_trust_level")]
+    trust_level: String,
+    #[serde(default = "default_federation_max_hops")]
+    max_hops: u8,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct FederationNodeSummary {
+    node_id: String,
+    endpoint: String,
+    enabled: bool,
+    description: String,
+    tags: Vec<String>,
+    trust_level: String,
+    max_hops: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FederatedRequest {
+    local_request_id: Uuid,
+    origin_agent_email: String,
+    target_node_id: String,
+    remote_request_id: Uuid,
+    path: Vec<String>,
+    status: FederatedRequestStatus,
+    created_at: u64,
+    expires_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct FederationLedgerEntry {
+    sequence: u64,
+    node_id: String,
+    event_type: String,
+    subject_id: String,
+    previous_hash: String,
+    event_hash: String,
+    event_json: Value,
+    created_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct FederationLedgerHead {
+    sequence: u64,
+    event_hash: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum FederatedRequestStatus {
+    Pending,
+    Answered,
+    Expired,
+    Failed,
+}
+
+impl FederatedRequestStatus {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Answered => "answered",
+            Self::Expired => "expired",
+            Self::Failed => "failed",
+        }
+    }
+
+    fn from_str(value: &str) -> Self {
+        match value {
+            "answered" => Self::Answered,
+            "expired" => Self::Expired,
+            "failed" => Self::Failed,
+            _ => Self::Pending,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct NetworkAskHumanRequest {
+    #[serde(flatten)]
+    request: CreateHumanRequest,
+    #[serde(default)]
+    target_node_id: Option<String>,
+    #[serde(default)]
+    route_tags: Vec<String>,
+    #[serde(default = "default_federation_max_hops")]
+    hop_limit: u8,
+    #[serde(default)]
+    path: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct NetworkSearchArgs {
+    q: Option<String>,
+    tag: Option<String>,
+    #[serde(default)]
+    include_local: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReadNetworkLedgerArgs {
+    limit: Option<u64>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct HumanAnswer {
     answer: String,
@@ -86,6 +207,7 @@ struct AnsweredRequest {
 #[derive(Clone, Debug, Serialize)]
 struct HumanLeaderboardEntry {
     email: String,
+    platform_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<String>,
     requests_handled: u64,
@@ -97,6 +219,7 @@ struct HumanLeaderboardEntry {
     profile: String,
     tags: Vec<String>,
     online: bool,
+    online_sources: Vec<OnlineSource>,
 }
 
 #[derive(Clone, Debug)]
@@ -237,10 +360,28 @@ struct HumanMemo {
     read_at: Option<u64>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct HumanMemoUnreadSource {
+    author_email: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    author_agent_name: Option<String>,
+    count: u64,
+    latest_at: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct HumanMemoUnreadSummary {
+    total: u64,
+    sources: Vec<HumanMemoUnreadSource>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ConnectedAgent {
     id: String,
     owner_email: String,
+    owner_platform_name: String,
     name: String,
     description: String,
     current_task: String,
@@ -304,6 +445,7 @@ struct AgentHumanMessage {
 #[derive(Clone, Debug, Serialize)]
 struct PublicUserProfile {
     email: String,
+    platform_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     login: Option<String>,
     provider: AuthProvider,
@@ -321,9 +463,17 @@ struct PublicUserProfile {
     friend_request_received: bool,
     onboarding_completed: bool,
     online: bool,
+    online_sources: Vec<OnlineSource>,
     last_login_at: u64,
     last_seen_at: u64,
     ban_expires_at: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+enum OnlineSource {
+    Web,
+    Wechat,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -347,6 +497,9 @@ enum ServerEvent {
     RequestExpired {
         id: Uuid,
         expired_request: ExpiredRequest,
+    },
+    MemoCreated {
+        memo: HumanMemo,
     },
     TaskCreated {
         task: AgentTask,
@@ -698,6 +851,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_federation_trust_level() -> String {
+    "limited".to_string()
+}
+
+fn default_federation_max_hops() -> u8 {
+    3
+}
+
 fn default_oauth_channels() -> Vec<OAuthChannel> {
     vec![OAuthChannel {
         provider: "github".to_string(),
@@ -851,8 +1012,10 @@ struct ListAgentInboxArgs {
 #[derive(Debug, Deserialize)]
 struct AgentAskMeArgs {
     #[serde(default)]
+    body: String,
+    #[serde(default, alias = "title")]
     title: String,
-    #[serde(default)]
+    #[serde(default, alias = "prompt")]
     prompt: String,
 }
 
@@ -875,6 +1038,8 @@ struct AdminUserUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct UserRecord {
     email: String,
+    #[serde(default)]
+    platform_name: String,
     #[serde(default)]
     login: Option<String>,
     #[serde(default)]
@@ -941,13 +1106,27 @@ struct UserStore {
 impl UserStore {
     fn load(path: &PathBuf) -> anyhow::Result<Self> {
         match fs::read_to_string(path) {
-            Ok(raw) => serde_json::from_str(&raw).context("parse users file"),
+            Ok(raw) => {
+                let mut store: Self = serde_json::from_str(&raw).context("parse users file")?;
+                let mut rekeyed = HashMap::new();
+                for mut record in store.users.into_values() {
+                    prepare_user_record(&mut record);
+                    let key = user_record_key(&record);
+                    if rekeyed.insert(key.clone(), record).is_some() {
+                        anyhow::bail!("duplicate user key after platform migration: {key}");
+                    }
+                }
+                store.users = rekeyed;
+                validate_unique_platform_names(&store.users)?;
+                Ok(store)
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => Err(err).context("read users file"),
         }
     }
 
     fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
+        validate_unique_platform_names(&self.users)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).context("create users file directory")?;
         }
@@ -966,6 +1145,7 @@ fn new_user_record(email: impl Into<String>, now: u64, profile: impl Into<String
     let email = normalize_email(&email.into());
     UserRecord {
         email,
+        platform_name: String::new(),
         created_at: now,
         last_login_at: now,
         login: None,
@@ -1000,6 +1180,21 @@ fn prepare_user_record(record: &mut UserRecord) {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+    record.platform_name = normalize_platform_name(&record.platform_name)
+        .or_else(|| {
+            record
+                .login
+                .as_deref()
+                .and_then(normalize_platform_name)
+        })
+        .or_else(|| {
+            record
+                .email
+                .split('@')
+                .next()
+                .and_then(normalize_platform_name)
+        })
+        .unwrap_or_else(|| format!("user-{}", random_secret(8).to_ascii_lowercase()));
     if record.is_public && record.visibility == ProfileVisibility::Private {
         record.visibility = ProfileVisibility::Public;
     }
@@ -1190,6 +1385,33 @@ fn open_db(path: &PathBuf) -> anyhow::Result<Connection> {
             expires_at INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_web_sessions_expires ON web_sessions(expires_at);
+
+        CREATE TABLE IF NOT EXISTS federated_requests (
+            local_request_id TEXT PRIMARY KEY,
+            origin_agent_email TEXT NOT NULL,
+            target_node_id TEXT NOT NULL,
+            remote_request_id TEXT NOT NULL,
+            path_json TEXT NOT NULL,
+            status TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_federated_requests_origin ON federated_requests(origin_agent_email, status, updated_at);
+        CREATE INDEX IF NOT EXISTS idx_federated_requests_remote ON federated_requests(target_node_id, remote_request_id);
+
+        CREATE TABLE IF NOT EXISTS federation_ledger (
+            sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+            node_id TEXT NOT NULL,
+            event_type TEXT NOT NULL,
+            subject_id TEXT NOT NULL,
+            previous_hash TEXT NOT NULL,
+            event_hash TEXT NOT NULL,
+            event_json TEXT NOT NULL,
+            created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_federation_ledger_subject ON federation_ledger(subject_id, sequence);
+        CREATE INDEX IF NOT EXISTS idx_federation_ledger_hash ON federation_ledger(event_hash);
         "#,
     )
     .context("initialize sqlite schema")?;

@@ -821,6 +821,54 @@ fn db_mark_human_memos_read(
     .map_err(|err| ApiError::internal(format!("mark human memos read: {err}")))
 }
 
+fn db_unread_human_memo_summary(
+    state: &AppState,
+    target_email: &str,
+    reader_email: &str,
+) -> Result<HumanMemoUnreadSummary, ApiError> {
+    let target_email = normalize_email(target_email);
+    let reader_email = normalize_email(reader_email);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let total = db
+        .query_row(
+            "SELECT COUNT(*) \
+             FROM human_memos \
+             WHERE target_email = ?1 AND author_email != ?2 AND read_at IS NULL",
+            params![target_email, reader_email],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(|err| ApiError::internal(format!("count unread human memos: {err}")))?;
+    let mut stmt = db
+        .prepare(
+            "SELECT author_email, author_agent_id, author_agent_name, COUNT(*), MAX(created_at) \
+             FROM human_memos \
+             WHERE target_email = ?1 AND author_email != ?2 AND read_at IS NULL \
+             GROUP BY author_email, author_agent_id, author_agent_name \
+             ORDER BY MAX(created_at) DESC \
+             LIMIT 50",
+        )
+        .map_err(|err| ApiError::internal(format!("prepare unread human memo summary: {err}")))?;
+    let rows = stmt
+        .query_map(params![target_email, reader_email], |row| {
+            Ok(HumanMemoUnreadSource {
+                author_email: row.get(0)?,
+                author_agent_id: row.get(1)?,
+                author_agent_name: row.get(2)?,
+                count: row.get(3)?,
+                latest_at: row.get(4)?,
+            })
+        })
+        .map_err(|err| ApiError::internal(format!("query unread human memo summary: {err}")))?;
+    let mut sources = Vec::new();
+    for row in rows {
+        sources.push(row.map_err(|err| ApiError::internal(format!("read unread human memo summary: {err}")))?);
+    }
+    Ok(HumanMemoUnreadSummary { total, sources })
+}
+
 fn db_touch_agent_connection(
     state: &AppState,
     agent: &AgentContext,
@@ -902,6 +950,10 @@ fn db_list_connected_agents(
         .db
         .lock()
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let users = state
+        .users
+        .lock()
+        .map_err(|_| ApiError::internal("user store lock poisoned"))?;
     let mut stmt = db
         .prepare(
             "SELECT c.id, c.owner_email, c.name, c.description, c.current_task, c.last_tool, \
@@ -945,6 +997,17 @@ fn db_list_connected_agents(
             request_count,
             relation_status,
         ) = row.map_err(|err| ApiError::internal(format!("read connected agent: {err}")))?;
+        let owner_key = canonical_user_key_from_identifier(
+            &users,
+            &owner_email,
+            &state.config.admin_email,
+        )
+        .unwrap_or_else(|| normalize_email(&owner_email));
+        let owner_platform_name = users
+            .users
+            .get(&owner_key)
+            .map(platform_name_for_record)
+            .unwrap_or_else(|| owner_email.clone());
         let pending_messages = db_list_agent_messages_for_human_locked(
             &db,
             &id,
@@ -956,6 +1019,7 @@ fn db_list_connected_agents(
         agents.push(ConnectedAgent {
             id,
             owner_email,
+            owner_platform_name,
             name,
             description,
             current_task,
@@ -990,6 +1054,21 @@ fn db_agent_exists(state: &AppState, agent_id: &str) -> Result<bool, ApiError> {
         .map_err(|err| ApiError::internal(format!("read agent connection: {err}")))?
         .is_some();
     Ok(exists)
+}
+
+fn db_agent_owner_email(state: &AppState, agent_id: &str) -> Result<String, ApiError> {
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    db.query_row(
+        "SELECT owner_email FROM agent_connections WHERE id = ?1",
+        params![agent_id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(|err| ApiError::internal(format!("read agent owner: {err}")))?
+    .ok_or_else(|| ApiError::bad_request("agent not found"))
 }
 
 fn db_agent_relation_status(
@@ -1054,39 +1133,13 @@ fn db_accept_agent_friend(
     Ok(AgentRelationStatus::Friends)
 }
 
-fn db_create_agent_human_message(
+fn db_create_agent_owner_memo(
     state: &AppState,
-    agent_id: &str,
-    human_email: &str,
-    direction: &str,
-    kind: &str,
+    owner_email: &str,
+    author_email: &str,
     body: &str,
-) -> Result<AgentHumanMessage, ApiError> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err(ApiError::bad_request("message body is required"));
-    }
-    if body.chars().count() > 2000 {
-        return Err(ApiError::bad_request("message body is too long"));
-    }
-    let message = AgentHumanMessage {
-        id: Uuid::new_v4(),
-        agent_id: agent_id.to_string(),
-        human_email: normalize_email(human_email),
-        direction: direction.to_string(),
-        kind: kind.to_string(),
-        body: body.to_string(),
-        status: "pending".to_string(),
-        created_at: now_unix(),
-        resolved_at: None,
-        read_at: None,
-    };
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
-    insert_agent_message_locked(&db, &message)?;
-    Ok(message)
+) -> Result<HumanMemo, ApiError> {
+    db_create_human_memo(state, owner_email, author_email, body)
 }
 
 fn db_list_agent_inbox(

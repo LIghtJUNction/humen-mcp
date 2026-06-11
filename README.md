@@ -234,7 +234,7 @@ The rest is folded so the README stays readable. Open only what you need.
 | systemd unit | `humen-mcp.service` |
 | self-update unit | `humen-mcp-self-update.service` |
 
-`GET /mcp` is intentionally not the UI; it returns a method warning. Open the UI at `/mcp/` with the trailing slash.
+`GET /mcp` is intentionally not the UI; it returns a method warning. Open the UI at `/`.
 
 </details>
 
@@ -290,6 +290,10 @@ Current tools include:
 | `ask_humen_choice_async` | Create a non-blocking choice request. |
 | `ask_humen_judgment_async` | Create a non-blocking yes/no judgment request. |
 | `read_humen_replies` | Read completed replies for the user attached to this agent secret. |
+| `list_humen_nodes` | List configured downstream humen-mcp nodes without exposing secrets. |
+| `search_humen_network` | Search visible human profiles across downstream humen-mcp nodes. |
+| `ask_humen_network_async` | Route an async human request to a downstream humen-mcp node and collect the answer through `read_humen_replies`. |
+| `read_humen_network_ledger` | Read the local hash-chained federation ledger for cross-node audit receipts. |
 | `create_humen_task` | Create a visible AI task for the human account attached to this agent secret. |
 | `list_humen_tasks` | List AI-created tasks for the attached human account. |
 | `leave_humen_memo` | Leave an offline memo on a visible human's memo board. |
@@ -305,6 +309,36 @@ Current tools include:
 | `create_humen_request_from_template` | Create an async human request from a plugin request template. |
 
 `approve`, `judge`, and `feedback` are blocking convenience wrappers over `ask_humen`. Use the `ask_humen_*_async` tools and `read_humen_replies` when the agent should continue work while the human answers.
+
+### humen-mcp Network
+
+A `humen-mcp` instance can act as a root or branch node and forward requests to downstream instances. The root loads child nodes from `HUMEN_FEDERATION_FILE`; each edge uses its own downstream agent secret. Remote answers are copied back into the root node's local reply mailbox, so callers still poll the root with `read_humen_replies`.
+
+TOML example:
+
+```toml
+[[nodes]]
+node_id = "branch-cn"
+endpoint = "https://branch.example/mcp"
+agent_secret = "child-node-agent-secret"
+description = "CN operators"
+tags = ["#ops", "#cn"]
+trust_level = "trusted"
+max_hops = 3
+```
+
+Network tools:
+
+- `list_humen_nodes`: inspect configured nodes; `agent_secret` is hidden.
+- `search_humen_network`: send profile searches to downstream nodes.
+- `ask_humen_network_async`: create a cross-node async request and read the returned local `request_id` with `read_humen_replies`.
+- `read_humen_network_ledger`: inspect recent local federation ledger entries and the current chain head.
+
+The network borrows the useful part of blockchain design: a local append-only
+hash chain. Each cross-node request creation, expiry, failure, and collected
+reply appends a ledger entry whose hash includes the previous entry hash. This
+creates tamper-evident routing receipts without adding proof-of-work, tokens, or
+global consensus.
 
 Reputation is a weighted trust score, not a raw average. GitHub OAuth seeds an initial prior from public account signals such as account age, public repositories, sampled stars, follower count, source-repo ratio, and recent activity. Each rating is weighted by the rater's current reputation, repeated ratings from the same actor update the prior rating, and reports create an audit entry plus a zero-score feedback signal. Profile and leaderboard responses include a public `reputation_breakdown` with seed source, seed weight, feedback weight, total weight, and confidence so agents can rank humans without guessing how much evidence backs the score.
 
@@ -449,7 +483,7 @@ WebSocket events:
 
 ```bash
 HUMEN_BIND=127.0.0.1:8787
-HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
+HUMEN_PUBLIC_BASE_URL=https://your-domain.example
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
 HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3
@@ -461,6 +495,8 @@ HUMEN_CLEANUP_INTERVAL_SECONDS=60
 HUMEN_SELF_UPDATE_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start humen-mcp-self-update.service
 HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=30
 HUMEN_PLUGIN_DIR=/etc/humen-mcp/plugins
+HUMEN_NODE_ID=root
+HUMEN_FEDERATION_FILE=/etc/humen-mcp/federation.toml
 ```
 
 Production note: after AUR install, make sure `/etc/humen-mcp.env` uses the packaged web directory:
@@ -469,7 +505,7 @@ Production note: after AUR install, make sure `/etc/humen-mcp.env` uses the pack
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 ```
 
-If this is left as `./humen-mcp-webui/dist`, `https://your-domain.example/mcp/` will return 404 because the service runs from `/var/lib/humen-mcp`.
+If this is left as `./humen-mcp-webui/dist`, `https://your-domain.example/` will return 404 because the service runs from `/var/lib/humen-mcp`.
 
 </details>
 

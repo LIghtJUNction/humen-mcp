@@ -195,6 +195,10 @@ curl -fsS http://127.0.0.1:8787/healthz
 | `ask_humen_choice_async` | 创建异步选择请求 |
 | `ask_humen_judgment_async` | 创建异步 yes/no 判断请求 |
 | `read_humen_replies` | 读取该 agent secret 所属用户的已完成回复 |
+| `list_humen_nodes` | 列出该节点配置的下游 humen-mcp 节点，不返回 secret |
+| `search_humen_network` | 跨下游节点搜索可见人类资料和标签 |
+| `ask_humen_network_async` | 把异步人类请求路由到下游 humen-mcp 节点，并通过 `read_humen_replies` 收回答案 |
+| `read_humen_network_ledger` | 读取本地哈希链联邦账本，用于跨节点审计收据 |
 | `create_humen_task` | 为所属人类账号创建可见 AI 任务 |
 | `list_humen_tasks` | 列出所属人类账号的 AI 任务 |
 | `leave_humen_memo` | 给可见人类的留言板留下离线留言 |
@@ -232,6 +236,32 @@ curl -fsS http://127.0.0.1:8787/healthz
 
 阻塞工具会等待回答。异步工具会立即返回 `request_id`，随后用 `read_humen_replies` 拉取结果。
 
+### humen-mcp 网络
+
+一个 `humen-mcp` 实例可以作为树根或分支节点，把请求转发到下游实例。根节点通过 `HUMEN_FEDERATION_FILE` 读取下游节点，转发时使用每条边独立的下游 agent secret。远端回答会被写回根节点本地回复邮箱，所以调用方仍然只需要轮询根节点的 `read_humen_replies`。
+
+TOML 配置示例：
+
+```toml
+[[nodes]]
+node_id = "branch-cn"
+endpoint = "https://branch.example/mcp"
+agent_secret = "child-node-agent-secret"
+description = "CN operators"
+tags = ["#ops", "#cn"]
+trust_level = "trusted"
+max_hops = 3
+```
+
+网络工具：
+
+- `list_humen_nodes`：查看已配置节点，输出会隐藏 `agent_secret`。
+- `search_humen_network`：把搜索请求发到下游节点。
+- `ask_humen_network_async`：创建跨节点异步请求；返回的本地 `request_id` 用 `read_humen_replies` 读取。
+- `read_humen_network_ledger`：查看最近的本地联邦账本条目和当前链头。
+
+网络借鉴区块链里真正有用的部分：本地 append-only 哈希链。每次跨节点请求创建、过期、失败和回复回收都会追加一条账本记录，记录 hash 会包含上一条记录 hash。这提供可篡改感知的路由收据，但不引入 PoW、代币或全网共识。
+
 ### 社区插件
 
 插件是声明式 JSON 或 TOML 清单，启动时从 `HUMEN_PLUGIN_DIR` 加载。一个插件可以贡献：
@@ -267,9 +297,11 @@ HUMEN_CLEANUP_INTERVAL_SECONDS=60
 HUMEN_SELF_UPDATE_COMMAND=/usr/bin/sudo -n /usr/bin/systemctl start humen-mcp-self-update.service
 HUMEN_SELF_UPDATE_TIMEOUT_SECONDS=30
 HUMEN_PLUGIN_DIR=/etc/humen-mcp/plugins
+HUMEN_NODE_ID=root
+HUMEN_FEDERATION_FILE=/etc/humen-mcp/federation.toml
 ```
 
-生产部署时，`HUMEN_WEB_DIST` 应指向 `/usr/share/humen-mcp/web`。如果仍是 `./humen-mcp-webui/dist`，服务从 `/var/lib/humen-mcp` 运行时 `/mcp/` 会返回 404。
+生产部署时，`HUMEN_WEB_DIST` 应指向 `/usr/share/humen-mcp/web`。如果仍是 `./humen-mcp-webui/dist`，服务从 `/var/lib/humen-mcp` 运行时 `/` 会返回 404。
 
 ## 发布打包
 

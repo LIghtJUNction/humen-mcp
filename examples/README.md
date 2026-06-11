@@ -11,6 +11,20 @@ curl -fsS http://127.0.0.1:8787/mcp \
   --data @examples/mcp-tools-list.json
 ```
 
+Async human requests prefer MCP notifications. Clients that support
+Streamable HTTP SSE can open a notification stream:
+
+```bash
+curl -N http://127.0.0.1:8787/mcp \
+  -H 'accept: text/event-stream' \
+  -H "x-humen-agent-secret: ${HUMEN_AGENT_SECRET}"
+```
+
+When a human reply is available, the stream emits
+`notifications/humen/reply_available`; call `read_humen_replies` for the full
+answer. If the stream is unavailable, keep using `read_humen_replies` as the
+polling fallback.
+
 The examples mirror the tool schemas in `src/mcp.rs`.
 
 | File | Tool or method |
@@ -25,6 +39,10 @@ The examples mirror the tool schemas in `src/mcp.rs`.
 | `mcp-ask-text-async.json` | `ask_humen_text_async` |
 | `mcp-ask-judgment-async.json` | `ask_humen_judgment_async` |
 | `mcp-read-replies.json` | `read_humen_replies` |
+| `mcp-list-nodes.json` | `list_humen_nodes` |
+| `mcp-search-network.json` | `search_humen_network` |
+| `mcp-ask-network-async.json` | `ask_humen_network_async` |
+| `mcp-read-network-ledger.json` | `read_humen_network_ledger` |
 | `mcp-list-plugins.json` | `list_humen_plugins` |
 | `mcp-create-from-template.json` | `create_humen_request_from_template` |
 | `mcp-create-task.json` | `create_humen_task` |

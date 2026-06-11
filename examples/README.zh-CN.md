@@ -11,6 +11,18 @@ curl -fsS http://127.0.0.1:8787/mcp \
   --data @examples/mcp-tools-list.json
 ```
 
+异步人类请求优先使用 MCP 通知。支持 Streamable HTTP SSE 的客户端可以打开通知流：
+
+```bash
+curl -N http://127.0.0.1:8787/mcp \
+  -H 'accept: text/event-stream' \
+  -H "x-humen-agent-secret: ${HUMEN_AGENT_SECRET}"
+```
+
+人类回复可用时，流会发出 `notifications/humen/reply_available`；随后调用
+`read_humen_replies` 获取完整回答。如果通知流不可用，继续用
+`read_humen_replies` 作为轮询 fallback。
+
 示例文件与 `src/mcp.rs` 中的工具 schema 保持一致。
 
 | 文件 | 工具或方法 |
@@ -25,6 +37,10 @@ curl -fsS http://127.0.0.1:8787/mcp \
 | `mcp-ask-text-async.json` | `ask_humen_text_async` |
 | `mcp-ask-judgment-async.json` | `ask_humen_judgment_async` |
 | `mcp-read-replies.json` | `read_humen_replies` |
+| `mcp-list-nodes.json` | `list_humen_nodes` |
+| `mcp-search-network.json` | `search_humen_network` |
+| `mcp-ask-network-async.json` | `ask_humen_network_async` |
+| `mcp-read-network-ledger.json` | `read_humen_network_ledger` |
 | `mcp-list-plugins.json` | `list_humen_plugins` |
 | `mcp-create-from-template.json` | `create_humen_request_from_template` |
 | `mcp-create-task.json` | `create_humen_task` |

@@ -1,5 +1,13 @@
 fn online_emails(state: &AppState) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
+    for (key, sources) in online_presence_sources(state) {
+        counts.insert(key, sources.len());
+    }
+    counts
+}
+
+fn online_web_emails(state: &AppState) -> HashMap<String, usize> {
+    let mut counts = HashMap::new();
     let Ok(users) = state.users.lock() else {
         return counts;
     };
@@ -15,6 +23,35 @@ fn online_emails(state: &AppState) -> HashMap<String, usize> {
         }
     }
     counts
+}
+
+fn online_presence_sources(state: &AppState) -> HashMap<String, HashSet<OnlineSource>> {
+    let mut sources: HashMap<String, HashSet<OnlineSource>> = online_web_emails(state)
+        .into_keys()
+        .map(|email| (email, HashSet::from([OnlineSource::Web])))
+        .collect();
+    let webhooks = state
+        .admin_settings
+        .lock()
+        .map(|settings| settings.webhooks.clone())
+        .unwrap_or_default();
+    for webhook in webhooks {
+        if normalize_webhook_kind(&webhook.kind) != "wechat"
+            || !webhook.enabled
+            || normalize_optional_value(webhook.weixin_bot_token.as_deref()).is_none()
+        {
+            continue;
+        }
+        let Some(assigned_to) = normalize_optional_value(webhook.assigned_to.as_deref()) else {
+            continue;
+        };
+        let key = canonical_user_key_from_email(state, &assigned_to);
+        sources
+            .entry(key)
+            .or_default()
+            .insert(OnlineSource::Wechat);
+    }
+    sources
 }
 
 fn online_identity_key(record: &UserRecord) -> String {
@@ -87,12 +124,32 @@ fn canonical_user_key_from_identifier(
                 .find(|record| {
                     normalize_email(&record.email) == wanted
                         || record
+                            .github_id
+                            .as_deref()
+                            .is_some_and(|github_id| github_identity_key(github_id) == wanted)
+                        || (!record.platform_name.trim().is_empty()
+                            && normalize_platform_name(&record.platform_name)
+                                .is_some_and(|value| value == wanted))
+                        || record
                             .login
                             .as_deref()
                             .is_some_and(|login| normalize_email(login) == wanted)
                 })
                 .map(canonical_user_key_from_record)
         })
+}
+
+fn validate_unique_platform_names(users: &HashMap<String, UserRecord>) -> anyhow::Result<()> {
+    let mut seen = HashSet::new();
+    for record in users.values() {
+        let Some(platform_name) = normalize_platform_name(&platform_name_for_record(record)) else {
+            continue;
+        };
+        if !seen.insert(platform_name.clone()) {
+            anyhow::bail!("duplicate platform name: {platform_name}");
+        }
+    }
+    Ok(())
 }
 
 fn clear_stale_active_periods(users: &mut UserStore) {
@@ -205,6 +262,65 @@ fn strip_base64_whitespace(value: &str) -> String {
 
 fn normalize_email(email: &str) -> String {
     email.trim().to_ascii_lowercase()
+}
+
+fn normalize_platform_name(value: &str) -> Option<String> {
+    let value = value.trim().to_ascii_lowercase();
+    if value.is_empty() {
+        return None;
+    }
+    let mut normalized = String::with_capacity(value.len());
+    let mut prev_dash = false;
+    for ch in value.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            Some(ch)
+        } else if matches!(ch, '-' | '_' | '.') {
+            Some('-')
+        } else {
+            None
+        };
+        let Some(mapped) = mapped else {
+            continue;
+        };
+        if mapped == '-' {
+            if prev_dash || normalized.is_empty() {
+                prev_dash = true;
+                continue;
+            }
+            prev_dash = true;
+            normalized.push(mapped);
+            continue;
+        }
+        prev_dash = false;
+        normalized.push(mapped);
+    }
+    while normalized.ends_with('-') {
+        normalized.pop();
+    }
+    if normalized.len() < 2 {
+        return None;
+    }
+    Some(normalized.chars().take(32).collect())
+}
+
+fn platform_name_for_record(record: &UserRecord) -> String {
+    let raw = record.platform_name.trim();
+    if !raw.is_empty() {
+        return raw.to_string();
+    }
+    if let Some(login) = record.login.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        return login.to_string();
+    }
+    if let Some(local_part) = record
+        .email
+        .split('@')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return local_part.to_string();
+    }
+    record.email.clone()
 }
 
 fn normalize_email_list(values: Vec<String>) -> Vec<String> {

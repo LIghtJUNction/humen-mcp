@@ -26,6 +26,8 @@ mod tests {
             self_update_command: String::new(),
             self_update_timeout_seconds: 120,
             plugin_dir: String::new(),
+            node_id: "test-root".to_string(),
+            federation_file: String::new(),
         })
         .unwrap()
     }
@@ -167,9 +169,316 @@ mod tests {
         assert!(tool_names.contains(&"approve"));
         assert!(tool_names.contains(&"judge"));
         assert!(tool_names.contains(&"feedback"));
+        assert!(tool_names.contains(&"list_humen_nodes"));
+        assert!(tool_names.contains(&"search_humen_network"));
+        assert!(tool_names.contains(&"ask_humen_network_async"));
+        assert!(tool_names.contains(&"read_humen_network_ledger"));
         assert!(tool_names.contains(&"list_humen_plugins"));
         assert!(tool_names.contains(&"create_humen_request_from_template"));
         assert!(tool_names.contains(&"leave_humen_memo"));
+    }
+
+    #[tokio::test]
+    async fn mcp_initialize_advertises_reply_notifications() {
+        let state = test_state();
+        {
+            let mut settings = state.admin_settings.lock().unwrap();
+            settings.agent_secret_prefix = Some("prefix-".to_string());
+        }
+        {
+            let mut users = state.users.lock().unwrap();
+            users.admin_settings.agent_secret_prefix = Some("prefix-".to_string());
+            let mut alice = new_user_record("alice@example.com", 1, "Alice");
+            alice.agent_secret = Some("alice-secret-123".to_string());
+            users.insert(alice);
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-humen-agent-secret",
+            "prefix-alice-secret-123".parse().unwrap(),
+        );
+        let response = mcp(
+            State(state),
+            headers,
+            Json(McpRequest {
+                jsonrpc: Some("2.0".to_string()),
+                id: Some(json!(1)),
+                method: "initialize".to_string(),
+                params: json!({
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "test-agent",
+                        "version": "0.1.0"
+                    }
+                }),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let payload: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["result"]["capabilities"]["experimental"]["humenNotifications"]
+                ["replyAvailableMethod"],
+            json!(HUMEN_REPLY_AVAILABLE_NOTIFICATION)
+        );
+        assert_eq!(
+            payload["result"]["capabilities"]["experimental"]["humenNotifications"]["fallbackTool"],
+            json!("read_humen_replies")
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_get_without_sse_accept_keeps_method_warning() {
+        let response = mcp_get(State(test_state()), HeaderMap::new()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn legacy_web_panel_route_redirects_to_root() {
+        let response = web_panel_legacy_redirect().await.into_response();
+        assert_eq!(response.status(), StatusCode::PERMANENT_REDIRECT);
+        assert_eq!(response.headers().get(header::LOCATION).unwrap(), "/");
+    }
+
+    #[test]
+    fn reply_available_notification_points_to_read_replies() {
+        let request = test_human_request();
+        let payload = mcp_reply_available_notification(request.id, &request, false);
+
+        assert_eq!(
+            payload["method"],
+            json!(HUMEN_REPLY_AVAILABLE_NOTIFICATION)
+        );
+        assert_eq!(payload["params"]["request_id"], json!(request.id));
+        assert_eq!(payload["params"]["reply_tool"], json!("read_humen_replies"));
+        assert!(payload["params"].get("answer").is_none());
+    }
+
+    #[test]
+    fn reply_available_notification_reaches_agent_created_federated_request() {
+        let state = test_state();
+        let mut request = test_human_request();
+        request.assigned_to = Some("node:branch-cn".to_string());
+        request.created_by = Some("alice@example.com".to_string());
+
+        let event = ServerEvent::RequestAnswered {
+            id: request.id,
+            request,
+            answer: HumanAnswer {
+                answer: "done".to_string(),
+                note: None,
+                answered_by: "remote@branch-cn".to_string(),
+                answered_at: now_unix(),
+            },
+            answered_late: false,
+        };
+
+        assert!(mcp_sse_event(&state, "alice@example.com", &event).is_some());
+    }
+
+    #[test]
+    fn federation_config_normalizes_nodes_without_exposing_secrets() {
+        let federation_file =
+            std::env::temp_dir().join(format!("humen-mcp-federation-{}.toml", Uuid::new_v4()));
+        fs::write(
+            &federation_file,
+            r##"
+[[nodes]]
+node_id = "branch-cn"
+endpoint = "https://branch.example/mcp/"
+agent_secret = "secret-token"
+description = "CN branch"
+tags = ["ops", "#cn"]
+"##,
+        )
+        .unwrap();
+
+        let registry = load_federation(federation_file.to_str().unwrap()).unwrap();
+        let summary = registry.summary();
+        assert_eq!(summary.len(), 1);
+        assert_eq!(summary[0].node_id, "branch-cn");
+        assert_eq!(summary[0].endpoint, "https://branch.example/mcp");
+        assert_eq!(summary[0].tags, vec!["#cn", "#ops"]);
+        let visible = serde_json::to_value(&summary[0]).unwrap();
+        assert!(visible.get("agent_secret").is_none());
+    }
+
+    #[test]
+    fn federation_ledger_entries_are_hash_chained() {
+        let state = test_state();
+        let first = db_append_federation_ledger_event(
+            &state,
+            "federated_request_created",
+            "request-1",
+            json!({ "target_node_id": "branch-cn" }),
+        )
+        .unwrap();
+        let second = db_append_federation_ledger_event(
+            &state,
+            "federated_reply_collected",
+            "request-1",
+            json!({ "answered_by": "human@branch-cn" }),
+        )
+        .unwrap();
+
+        assert_eq!(first.sequence, 1);
+        assert_eq!(first.previous_hash, "genesis");
+        assert_eq!(second.sequence, 2);
+        assert_eq!(second.previous_hash, first.event_hash);
+        assert_ne!(second.event_hash, first.event_hash);
+
+        let head = db_federation_ledger_head(&state).unwrap().unwrap();
+        assert_eq!(head.sequence, 2);
+        assert_eq!(head.event_hash, second.event_hash);
+
+        let entries = db_list_federation_ledger_entries(&state, 10).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].sequence, 2);
+        assert_eq!(entries[1].sequence, 1);
+    }
+
+    #[test]
+    fn human_memo_unread_summary_excludes_self_and_clears_on_read() {
+        let state = test_state();
+        db_create_human_memo(&state, "alice@example.com", "bob@example.com", "one").unwrap();
+        db_create_human_memo(&state, "alice@example.com", "bob@example.com", "two").unwrap();
+        db_create_human_memo(&state, "alice@example.com", "alice@example.com", "self").unwrap();
+        db_create_human_memo_with_agent(
+            &state,
+            "alice@example.com",
+            "carol@example.com",
+            Some("agent-1"),
+            Some("Review Agent"),
+            "agent memo",
+        )
+        .unwrap();
+
+        let summary =
+            db_unread_human_memo_summary(&state, "alice@example.com", "alice@example.com").unwrap();
+
+        assert_eq!(summary.total, 3);
+        assert_eq!(summary.sources.len(), 2);
+        let carol = summary
+            .sources
+            .iter()
+            .find(|source| source.author_email == "carol@example.com")
+            .unwrap();
+        let bob = summary
+            .sources
+            .iter()
+            .find(|source| source.author_email == "bob@example.com")
+            .unwrap();
+        assert_eq!(carol.author_agent_id.as_deref(), Some("agent-1"));
+        assert_eq!(carol.count, 1);
+        assert_eq!(bob.count, 2);
+
+        let marked =
+            db_mark_human_memos_read(&state, "alice@example.com", "alice@example.com").unwrap();
+        assert_eq!(marked, 3);
+
+        let summary =
+            db_unread_human_memo_summary(&state, "alice@example.com", "alice@example.com").unwrap();
+        assert_eq!(summary.total, 0);
+        assert!(summary.sources.is_empty());
+    }
+
+    #[tokio::test]
+    async fn network_ask_requires_an_enabled_federation_node() {
+        let state = test_state();
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: "agent-1".to_string(),
+            agent_name: "Agent".to_string(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+
+        let err = ask_humen_network_async(
+            state,
+            agent,
+            Some(json!(1)),
+            NetworkAskHumanRequest {
+                request: CreateHumanRequest {
+                    kind: TaskKind::Text,
+                    title: "Remote help".to_string(),
+                    prompt: "Please check this.".to_string(),
+                    choices: Vec::new(),
+                    image_url: None,
+                    image_base64: None,
+                    image_mime_type: None,
+                    steps: Vec::new(),
+                    timeout_seconds: 60,
+                    background: true,
+                    target_human_email: None,
+                },
+                target_node_id: None,
+                route_tags: Vec::new(),
+                hop_limit: 3,
+                path: Vec::new(),
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+        assert!(err.message.contains("no enabled federation nodes"));
+    }
+
+    #[tokio::test]
+    async fn forwarded_network_ask_falls_back_to_leaf_local_request() {
+        let state = test_state();
+        let agent = AgentContext {
+            email: "branch-owner@example.com".to_string(),
+            agent_id: "parent-agent".to_string(),
+            agent_name: "Parent".to_string(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+
+        let response = ask_humen_network_async(
+            state.clone(),
+            agent,
+            Some(json!(1)),
+            NetworkAskHumanRequest {
+                request: CreateHumanRequest {
+                    kind: TaskKind::Text,
+                    title: "Leaf help".to_string(),
+                    prompt: "Please answer locally.".to_string(),
+                    choices: Vec::new(),
+                    image_url: None,
+                    image_base64: None,
+                    image_mime_type: None,
+                    steps: Vec::new(),
+                    timeout_seconds: 60,
+                    background: true,
+                    target_human_email: None,
+                },
+                target_node_id: None,
+                route_tags: Vec::new(),
+                hop_limit: 2,
+                path: vec!["root".to_string()],
+            },
+        )
+        .await
+        .unwrap();
+
+        let text = response.0["result"]["content"][0]["text"].as_str().unwrap();
+        let payload: Value = serde_json::from_str(text).unwrap();
+        let request_id = Uuid::parse_str(payload["request_id"].as_str().unwrap()).unwrap();
+        let (request, status) = db_get_request(&state, request_id).unwrap().unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(request.created_by.as_deref(), Some("branch-owner@example.com"));
+        assert_eq!(
+            request.assigned_to.as_deref(),
+            Some("branch-owner@example.com")
+        );
     }
 
     #[test]
@@ -1162,24 +1471,96 @@ mod tests {
     }
 
     #[test]
-    fn weixin_incoming_messages_enter_the_bound_web_inbox() {
+    fn weixin_unmatched_messages_do_not_create_human_requests() {
         let state = test_state();
+        let mut webhook = test_webhook(String::new());
+        webhook.assigned_to = Some("Alice@Example.COM".to_string());
+
+        handle_weixin_incoming_message(
+            &state,
+            &webhook,
+            &json!({
+                "from_user_id": "friend",
+                "text": "ping"
+            }),
+        );
+
+        assert!(state.requests.is_empty());
+    }
+
+    #[test]
+    fn non_admin_webhook_save_is_limited_to_own_weixin_connection() {
+        let state = test_state();
+        let mut generic = test_webhook(String::new());
+        generic.kind = "generic".to_string();
+        generic.url = "https://example.com/webhook".to_string();
+        generic.assigned_to = Some("bob@example.com".to_string());
+
+        let mut bob_weixin = test_webhook(String::new());
+        bob_weixin.assigned_to = Some("bob@example.com".to_string());
+
+        let mut alice_weixin = test_webhook(String::new());
+        alice_weixin.assigned_to = Some("alice@example.com".to_string());
+
+        let mut current = AdminSettings::default();
+        current.webhooks = vec![generic.clone(), bob_weixin.clone(), alice_weixin.clone()];
+
+        let visible =
+            webhooks_visible_to_session(&state, "alice@example.com", false, &current.webhooks);
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, alice_weixin.id);
+
+        let mut alice_update = alice_weixin.clone();
+        alice_update.enabled = false;
+        let merged = merge_webhooks_for_session(
+            &state,
+            "alice@example.com",
+            false,
+            current,
+            vec![alice_update.clone()],
+        )
+        .unwrap();
+
+        assert!(merged.webhooks.iter().any(|webhook| webhook.id == generic.id));
+        assert!(merged
+            .webhooks
+            .iter()
+            .any(|webhook| webhook.id == bob_weixin.id));
+        assert!(merged.webhooks.iter().any(|webhook| {
+            webhook.id == alice_weixin.id && webhook.enabled == alice_update.enabled
+        }));
+
+        let mut cross_user_weixin = test_webhook(String::new());
+        cross_user_weixin.assigned_to = Some("bob@example.com".to_string());
+        let err = validate_webhook_for_session(
+            &state,
+            "alice@example.com",
+            false,
+            &cross_user_weixin,
+        )
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn unbound_weixin_webhooks_do_not_receive_or_answer_messages() {
+        let state = test_state();
+        let webhook = test_webhook(String::new());
+        let mut request = test_human_request();
+        request.assigned_to = Some("alice@example.com".to_string());
+        state.requests.insert(request.id, request.clone());
         let incoming = IncomingMessage {
             source: "wechat".to_string(),
             sender: "friend".to_string(),
-            content: "ping".to_string(),
-            raw: json!({ "text": "ping" }),
+            content: format!("answer {}", request.id),
+            raw: json!({}),
         };
 
-        let request = create_incoming_request(
-            &state,
-            &incoming,
-            Some("Alice@Example.COM".to_string()),
-        );
-
-        assert_eq!(request.assigned_to.as_deref(), Some("alice@example.com"));
-        assert!(can_access_request(&state, "alice@example.com", &request));
-        assert!(!can_access_request(&state, "bob@example.com", &request));
+        assert!(!webhook_receives_request(&state, &webhook, &request));
+        assert!(answer_weixin_message(&state, &webhook, &incoming)
+            .unwrap()
+            .is_none());
+        assert!(state.requests.contains_key(&request.id));
     }
 
     #[test]
@@ -1366,6 +1747,48 @@ mod tests {
             resolve_visible_human_memo_target(&state, "alice@example.com", "dave@example.com")
                 .unwrap_err();
         assert_eq!(hidden.status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn public_profile_lookup_uses_platform_name_slug() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            let mut record = new_user_record("alice@example.com", 1, "Alice");
+            record.is_public = true;
+            users.insert(record);
+            users.save(&state.config.users_file).unwrap();
+        }
+
+        let profile = public_profile_by_platform_name(&state, "alice")
+            .unwrap()
+            .expect("profile exists");
+        assert_eq!(profile.platform_name, "alice");
+        assert_eq!(profile.email, "alice@example.com");
+        assert_eq!(profile.profile, "Alice");
+    }
+
+    #[test]
+    fn agent_ask_me_writes_a_memo_for_the_bound_user() {
+        let state = test_state();
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "INSERT INTO agent_connections \
+                 (id, owner_email, name, description, current_task, last_tool, first_seen_at, last_seen_at, last_request_at, request_count) \
+                 VALUES (?1, ?2, ?3, ?4, '', ?5, 1, 1, 1, 1)",
+                params!["agent-1", "alice@example.com", "Agent", "Desc", "tools/call"],
+            )
+            .unwrap();
+        }
+
+        let owner = db_agent_owner_email(&state, "agent-1").unwrap();
+        assert_eq!(owner, "alice@example.com");
+        let memo = db_create_agent_owner_memo(&state, &owner, "bob@example.com", "Ping the owner.")
+            .unwrap();
+        assert_eq!(memo.target_email, "alice@example.com");
+        assert_eq!(memo.author_email, "bob@example.com");
+        assert_eq!(memo.body, "Ping the owner.");
     }
 
     #[test]
