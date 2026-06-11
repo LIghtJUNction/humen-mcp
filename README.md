@@ -30,7 +30,7 @@
   <a href="https://github.com/LIghtJUNction/humen-mcp/actions/workflows/release.yml"><img alt="Release workflow" src="https://github.com/LIghtJUNction/humen-mcp/actions/workflows/release.yml/badge.svg" /></a>
   <a href="https://github.com/LIghtJUNction/humen-mcp/releases"><img alt="GitHub release" src="https://img.shields.io/github/v/release/LIghtJUNction/humen-mcp?display_name=tag&sort=semver" /></a>
   <a href="Cargo.toml"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-green.svg" /></a>
-  <a href="Cargo.toml"><img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-f46623?logo=rust&logoColor=white" /></a>
+  <a href="Cargo.toml"><img alt="Rust 2024" src="https://img.shields.io/badge/Rust-2024-f46623?logo=rust&logoColor=white" /></a>
   <a href="https://modelcontextprotocol.io/"><img alt="MCP" src="https://img.shields.io/badge/MCP-human--in--the--loop-6f42c1" /></a>
   <a href="Cargo.toml"><img alt="Axum backend" src="https://img.shields.io/badge/backend-Axum-005f73" /></a>
   <a href="humen-mcp-webui/package.json"><img alt="React 19 frontend" src="https://img.shields.io/badge/frontend-React%2019-61dafb?logo=react&logoColor=111111" /></a>

@@ -1,7 +1,7 @@
 [package]
 name = "humen-mcp"
 version = "0.1.5"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 description = "Humen as an MCP tool: route agent requests to logged-in humans."
 repository = "https://github.com/LIghtJUNction/humen-mcp"
