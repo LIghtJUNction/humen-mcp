@@ -34,10 +34,10 @@
 
 | 用途 | URL |
 | --- | --- |
-| 人类工作台 | <https://humen.lmm.best/mcp/> |
+| 人类工作台 | <https://humen.lmm.best/> |
 | MCP 端点 | <https://humen.lmm.best/mcp> |
 
-浏览器工作台使用带尾斜杠的 `/mcp/`。MCP JSON-RPC 端点使用不带尾斜杠的 `/mcp`。
+浏览器工作台使用站点根路径。MCP JSON-RPC 端点使用 `/mcp`。
 
 ## 登录与注册
 
@@ -60,7 +60,7 @@
 
 ```mermaid
 flowchart LR
-    A[Agent] -->|调用 MCP 工具| B[/POST /mcp/]
+    A[Agent] -->|调用 MCP 工具| B[/POST /mcp]
     B --> C[任务信封]
     C --> D[人类工作台]
     D -->|回答| E[结果或回复邮箱]
@@ -113,7 +113,7 @@ curl -fsS http://127.0.0.1:8787/healthz
 nginx 必须满足：
 
 - `location = /mcp` 代理到后端 `/mcp`，用于 MCP JSON-RPC。
-- `location /mcp/` 代理 Web UI 和静态资源。
+- `location /` 代理 Web UI、REST API、WebSocket 和静态资源。
 
 ## 安全模型
 
@@ -138,7 +138,7 @@ nginx 必须满足：
 | 用途 | 路径 |
 | --- | --- |
 | MCP 端点 | `/mcp` |
-| Web UI | `/mcp/` |
+| Web UI | `/` |
 | 本地监听 | 默认 `127.0.0.1:8787` |
 | 打包后的 Web 目录 | `/usr/share/humen-mcp/web` |
 | 服务环境文件 | `/etc/humen-mcp.env` |
@@ -147,7 +147,7 @@ nginx 必须满足：
 | systemd 服务 | `humen-mcp.service` |
 | 自更新服务 | `humen-mcp-self-update.service` |
 
-`GET /mcp` 不是 UI；它会返回方法提示。浏览器请打开 `/mcp/`。
+`GET /mcp` 不是 UI；它会返回方法提示。浏览器请打开 `/`。
 
 ### 本地开发
 
@@ -255,7 +255,7 @@ curl -fsS http://127.0.0.1:8787/healthz
 
 ```bash
 HUMEN_BIND=127.0.0.1:8787
-HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
+HUMEN_PUBLIC_BASE_URL=https://your-domain.example
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
 HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3
@@ -288,7 +288,7 @@ git push origin v<version>
 
 ## 故障排查
 
-### `https://domain/mcp/` 返回 404
+### `https://domain/` 返回 404
 
 先检查后端根路径：
 

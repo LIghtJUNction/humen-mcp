@@ -2,11 +2,11 @@
 
 You are the deployment agent for `humen-mcp`.
 
-Objective: install and expose `humen-mcp` on an Arch Linux server behind HTTPS, with the MCP JSON-RPC endpoint at `/mcp` and the human web panel at `/mcp/`.
+Objective: install and expose `humen-mcp` on an Arch Linux server behind HTTPS, with the human web panel at the site root and the MCP JSON-RPC endpoint at `/mcp`.
 
 ## First confirm or discover
 
-- Target domain, for example `https://your-domain.example/mcp`.
+- Target domain, for example `https://your-domain.example`.
 - Admin email.
 - Whether GitHub OAuth credentials are already available:
   - `HUMEN_GITHUB_CLIENT_ID`
@@ -18,8 +18,9 @@ If the server is not Arch Linux, stop and ask for the intended install path. The
 
 ## Non-negotiable routing
 
+- `/` is the browser web panel.
 - `/mcp` is the MCP JSON-RPC endpoint.
-- `/mcp/` with the trailing slash is the browser web panel.
+- `/mcp/` should redirect to `/` to avoid confusion with the MCP endpoint.
 - `GET /mcp` is expected to return a method warning, not the UI.
 
 ## Login model
@@ -76,7 +77,7 @@ Required production values:
 
 ```bash
 HUMEN_BIND=127.0.0.1:8787
-HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
+HUMEN_PUBLIC_BASE_URL=https://your-domain.example
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
 HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3
@@ -102,8 +103,8 @@ curl -fsS http://127.0.0.1:8787/healthz
 6. Configure nginx so the public domain routes correctly:
 
 - `location = /mcp` proxies to `http://127.0.0.1:8787/mcp`.
-- `location /mcp/` proxies to the web UI and static assets.
-- Keep WebSocket upgrade headers for `/mcp/api/ws` or equivalent proxied paths.
+- `location /` proxies to the web UI, REST APIs, WebSocket, and static assets.
+- Keep WebSocket upgrade headers for `/api/ws`.
 
 Validate and reload:
 
@@ -115,8 +116,8 @@ sudo systemctl reload nginx
 7. Verify externally:
 
 ```bash
-curl -fsS https://your-domain.example/mcp/api/auth/config
-curl -i https://your-domain.example/mcp/
+curl -fsS https://your-domain.example/api/auth/config
+curl -i https://your-domain.example/
 curl -fsS https://your-domain.example/mcp \
   -H 'content-type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
@@ -124,14 +125,14 @@ curl -fsS https://your-domain.example/mcp \
 
 The unauthenticated `tools/list` call should fail unless an agent secret is configured and sent. That is expected. The important checks are:
 
-- `/mcp/` returns the web UI HTML.
-- `/mcp/api/auth/config` reports GitHub OAuth availability when credentials are configured.
+- `/` returns the web UI HTML.
+- `/api/auth/config` reports GitHub OAuth availability when credentials are configured.
 - `humen-mcp.service` is active.
 - `HUMEN_WEB_DIST` points to `/usr/share/humen-mcp/web`.
 
 8. Final response to the user:
 
-- Give the panel URL: `https://your-domain.example/mcp/`.
+- Give the panel URL: `https://your-domain.example/`.
 - Give the MCP endpoint: `https://your-domain.example/mcp`.
 - Tell normal users to use GitHub OAuth.
 - Mention passkey support.

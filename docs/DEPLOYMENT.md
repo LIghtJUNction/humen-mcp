@@ -2,17 +2,16 @@
 
 Language: [English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-Target: Arch Linux server, served under `https://your-domain.example/mcp`.
+Target: Arch Linux server, served under `https://your-domain.example/`.
 
 Public hosted instance:
 
 | Purpose | URL |
 | --- | --- |
-| Human workbench | `https://humen.lmm.best/mcp/` |
+| Human workbench | `https://humen.lmm.best/` |
 | MCP endpoint | `https://humen.lmm.best/mcp` |
 
-The browser panel uses `/mcp/` with a trailing slash. MCP clients use `/mcp`
-without the trailing slash.
+The browser panel uses the site root. MCP clients use `/mcp`.
 
 ## Agent-assisted install
 
@@ -78,7 +77,7 @@ The command writes `/etc/humen-mcp.env`, generates a session secret, and prints 
 
 ```bash
 HUMEN_BIND=127.0.0.1:8787
-HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
+HUMEN_PUBLIC_BASE_URL=https://your-domain.example
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
 HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3
@@ -141,4 +140,4 @@ curl -s http://127.0.0.1:8787/mcp \
   --data @examples/mcp-tools-list.json
 ```
 
-Open `https://your-domain.example/mcp/`, log in, and confirm the sidebar shows the live online count.
+Open `https://your-domain.example/`, log in, and confirm the sidebar shows the live online count.

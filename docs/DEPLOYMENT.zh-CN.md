@@ -2,16 +2,16 @@
 
 语言：[English](DEPLOYMENT.md) | [简体中文](DEPLOYMENT.zh-CN.md)
 
-目标：在 Arch Linux 服务器上部署，并通过 `https://your-domain.example/mcp` 提供服务。
+目标：在 Arch Linux 服务器上部署，并通过 `https://your-domain.example/` 提供 Web 面板，同时通过 `/mcp` 提供 MCP 端点。
 
 公开实例：
 
 | 用途 | URL |
 | --- | --- |
-| 人类工作台 | `https://humen.lmm.best/mcp/` |
+| 人类工作台 | `https://humen.lmm.best/` |
 | MCP 端点 | `https://humen.lmm.best/mcp` |
 
-浏览器面板使用带尾斜杠的 `/mcp/`。MCP 客户端使用不带尾斜杠的 `/mcp`。
+浏览器面板使用站点根路径。MCP 客户端使用 `/mcp`。
 
 ## 智能体辅助安装
 
@@ -70,7 +70,7 @@ sudo humen-mcp init-admin --email <admin-email>
 
 ```bash
 HUMEN_BIND=127.0.0.1:8787
-HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
+HUMEN_PUBLIC_BASE_URL=https://your-domain.example
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 HUMEN_USERS_FILE=/var/lib/humen-mcp/users.json
 HUMEN_DB_FILE=/var/lib/humen-mcp/humen-mcp.sqlite3
@@ -124,7 +124,7 @@ systemctl reload nginx
 必须满足：
 
 - `location = /mcp` 代理到后端 `/mcp`，用于 MCP JSON-RPC。
-- `location /mcp/` 代理到 Web UI 和静态资源。
+- `location /` 代理到 Web UI、REST API、WebSocket 和静态资源。
 
 ## 插件目录
 
@@ -153,4 +153,4 @@ curl -s http://127.0.0.1:8787/mcp \
   --data @examples/mcp-tools-list.json
 ```
 
-打开 `https://your-domain.example/mcp/`，登录后确认侧边栏显示在线人数。
+打开 `https://your-domain.example/`，登录后确认侧边栏显示在线人数。

@@ -59,14 +59,14 @@ For Simplified Chinese documentation, see [README.zh-CN.md](README.zh-CN.md).
 
 | Purpose | URL |
 | --- | --- |
-| Human workbench | <https://humen.lmm.best/mcp/> |
+| Human workbench | <https://humen.lmm.best/> |
 | MCP endpoint | <https://humen.lmm.best/mcp> |
 
-Use the trailing slash for the browser panel: `/mcp/`. Use the no-trailing-slash endpoint for MCP JSON-RPC: `/mcp`.
+Use the site root for the browser panel. Use the no-trailing-slash endpoint for MCP JSON-RPC: `/mcp`.
 
 ## Login And Registration
 
-Use **GitHub OAuth** to register and log in to the public panel at <https://humen.lmm.best/mcp/>. More login methods can be added later.
+Use **GitHub OAuth** to register and log in to the public panel at <https://humen.lmm.best/>. More login methods can be added later.
 
 Normal users do not need a password. There is no ordinary user password to remember, store, or leak. After logging in, users can add a passkey and use passwordless sign-in on supported devices.
 
@@ -87,7 +87,7 @@ Email/password login is only for the administrator account. The admin password i
 
 ```mermaid
 flowchart LR
-    A[Agent] -->|calls MCP tool| B[/POST /mcp/]
+    A[Agent] -->|calls MCP tool| B[/POST /mcp]
     B --> C[Task envelope]
     C --> D[Human workbench]
     D -->|answer| E[Result or reply mailbox]
@@ -119,7 +119,7 @@ Copy this command, run it anywhere with internet access, then send the fetched p
 curl -fsSL https://raw.githubusercontent.com/LIghtJUNction/humen-mcp/main/docs/AGENT_DEPLOY_PROMPT.md
 ```
 
-The prompt tells the agent to inspect the server, install the package, configure `/mcp`, verify the MCP endpoint, and keep admin secrets out of public output.
+The prompt tells the agent to inspect the server, install the package, configure the site root and `/mcp`, verify the MCP endpoint, and keep admin secrets out of public output.
 
 <details>
 <summary><strong>Manual Server Deployment Guide</strong></summary>
@@ -144,7 +144,7 @@ sudoedit /etc/humen-mcp.env
 3. Set the public URL and packaged web directory:
 
 ```bash
-HUMEN_PUBLIC_BASE_URL=https://your-domain.example/mcp
+HUMEN_PUBLIC_BASE_URL=https://your-domain.example
 HUMEN_WEB_DIST=/usr/share/humen-mcp/web
 ```
 
@@ -165,16 +165,16 @@ curl -fsS http://127.0.0.1:8787/healthz
 6. Configure nginx so:
 
 - `location = /mcp` proxies to backend `/mcp` for MCP JSON-RPC.
-- `location /mcp/` proxies to the web UI and static assets.
+- `location /` proxies to the web UI, API, WebSocket, and static assets.
 
 7. Verify:
 
 ```bash
-curl -fsS https://your-domain.example/mcp/api/auth/config
-curl -i https://your-domain.example/mcp/
+curl -fsS https://your-domain.example/api/auth/config
+curl -i https://your-domain.example/
 ```
 
-The panel should load at `https://your-domain.example/mcp/`. Normal users should register with GitHub OAuth, then optionally add a passkey.
+The panel should load at `https://your-domain.example/`. Normal users should register with GitHub OAuth, then optionally add a passkey.
 
 </details>
 
@@ -204,7 +204,7 @@ The rest is folded so the README stays readable. Open only what you need.
 <summary><strong>What It Provides</strong></summary>
 
 - MCP JSON-RPC endpoint at `/mcp`.
-- Human workbench web UI served under `/mcp/`.
+- Human workbench web UI served at `/`.
 - Rust backend with REST APIs and WebSocket updates.
 - Bun/Vite/React frontend in the `humen-mcp-webui` git submodule.
 - Blocking and async human request tools for text, choice, yes/no judgment, image review, and step-by-step tasks.
@@ -225,7 +225,7 @@ The rest is folded so the README stays readable. Open only what you need.
 | Purpose | Path |
 | --- | --- |
 | MCP endpoint | `/mcp` |
-| Web UI | `/mcp/` |
+| Web UI | `/` |
 | Local backend bind | `127.0.0.1:8787` by default |
 | Packaged web dist | `/usr/share/humen-mcp/web` |
 | Service env file | `/etc/humen-mcp.env` |
@@ -530,19 +530,19 @@ Include `packaging/nginx/humen-mcp.conf` in the HTTPS server block for your doma
 Required behavior:
 
 - `location = /mcp` proxies to backend `/mcp` for JSON-RPC.
-- `location /mcp/` proxies to backend `/` for the web UI and static assets.
-- `location /` may redirect to `/mcp/`.
+- `location /` proxies to backend `/` for the web UI, API, WebSocket, and static assets.
+- `/mcp/` should redirect to `/`.
 
 Example verification:
 
 ```bash
 sudo nginx -t
 sudo systemctl reload nginx
-curl -i https://your-domain.example/mcp/
-curl -fsS https://your-domain.example/mcp/api/auth/config
+curl -i https://your-domain.example/
+curl -fsS https://your-domain.example/api/auth/config
 ```
 
-A working `/mcp/` response should be `HTTP 200` with the web UI HTML.
+A working `/` response should be `HTTP 200` with the web UI HTML.
 
 </details>
 
@@ -559,7 +559,7 @@ curl -fsS http://127.0.0.1:8787/healthz
 curl -fsS http://127.0.0.1:8787/mcp \
   -H 'content-type: application/json' \
   --data @examples/mcp-tools-list.json
-curl -i https://your-domain.example/mcp/
+curl -i https://your-domain.example/
 ```
 
 Expected:
@@ -567,7 +567,7 @@ Expected:
 - service is `active`
 - health returns `{"ok":true}`
 - `tools/list` includes `ask_humen`
-- `/mcp/` returns the web UI HTML, not 404
+- `/` returns the web UI HTML, not 404
 
 </details>
 
@@ -614,7 +614,7 @@ For `humen-mcp-bin`, upload the tarball to GitHub Release `v<version>`, then upd
 <details>
 <summary><strong>Troubleshooting</strong></summary>
 
-### `https://domain/mcp/` returns 404
+### `https://domain/` returns 404
 
 Check backend root first:
 
