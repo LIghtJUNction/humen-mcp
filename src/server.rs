@@ -69,6 +69,7 @@ fn api_router() -> Router<AppState> {
         .route("/auth/oauth/github/start", get(github_oauth_start))
         .route("/auth/oauth/github/callback", get(github_oauth_callback))
         .route("/public/leaderboard", get(list_public_leaderboard))
+        .route("/public/agents", get(list_public_agents))
         .route("/public/users/{username}", get(public_user_profile))
         .route("/me", get(me))
         .route("/me/profile", get(me_profile).post(update_me_profile))

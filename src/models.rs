@@ -398,6 +398,21 @@ struct ConnectedAgent {
     pending_messages: Vec<AgentHumanMessage>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct PublicConnectedAgent {
+    owner_platform_name: String,
+    name: String,
+    description: String,
+    current_task: String,
+    last_tool: String,
+    last_seen_at: u64,
+    last_request_at: Option<u64>,
+    request_count: u64,
+    reputation: f64,
+    ratings_count: u64,
+    online: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum AgentRelationStatus {

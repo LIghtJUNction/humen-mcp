@@ -79,6 +79,28 @@ async fn list_public_leaderboard(
     )?))
 }
 
+async fn list_public_agents(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PublicConnectedAgent>>, ApiError> {
+    let agents = db_list_connected_agents(&state, "", 24)?
+        .into_iter()
+        .map(|agent| PublicConnectedAgent {
+            owner_platform_name: agent.owner_platform_name,
+            name: agent.name,
+            description: agent.description,
+            current_task: agent.current_task,
+            last_tool: agent.last_tool,
+            last_seen_at: agent.last_seen_at,
+            last_request_at: agent.last_request_at,
+            request_count: agent.request_count,
+            reputation: agent.reputation,
+            ratings_count: agent.ratings_count,
+            online: agent.online,
+        })
+        .collect();
+    Ok(Json(agents))
+}
+
 fn leaderboard_entries_for_profiles(
     state: &AppState,
     profiles: Vec<PublicUserProfile>,
@@ -99,8 +121,8 @@ fn leaderboard_entries_for_profiles(
                 requests_handled: stat.as_ref().map(|stat| stat.requests_handled).unwrap_or(0),
                 sent_tokens: stat.as_ref().map(|stat| stat.sent_tokens).unwrap_or(0),
                 latest_answered_at: stat.and_then(|stat| stat.latest_answered_at),
-            reputation: profile.reputation,
-            ratings_count: profile.ratings_count,
+                reputation: profile.reputation,
+                ratings_count: profile.ratings_count,
                 reputation_breakdown: profile.reputation_breakdown,
                 profile: profile.profile,
                 tags: profile.tags,
