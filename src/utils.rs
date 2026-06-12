@@ -1,11 +1,3 @@
-fn online_emails(state: &AppState) -> HashMap<String, usize> {
-    let mut counts = HashMap::new();
-    for (key, sources) in online_presence_sources(state) {
-        counts.insert(key, sources.len());
-    }
-    counts
-}
-
 fn online_web_emails(state: &AppState) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     let Ok(users) = state.users.lock() else {
@@ -379,6 +371,33 @@ fn mcp_error_with_data(
 
 fn default_timeout() -> u64 {
     60
+}
+
+fn normalize_memo_body(body: &str) -> Result<String, ApiError> {
+    let normalized = body.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    if trimmed.is_empty() {
+        return Err(ApiError::bad_request("memo body is required"));
+    }
+    if trimmed.chars().count() > MEMO_BODY_MAX_CHARS {
+        return Err(ApiError::bad_request(format!(
+            "memo body must be at most {MEMO_BODY_MAX_CHARS} characters"
+        )));
+    }
+    if trimmed.lines().count() > MEMO_BODY_MAX_LINES {
+        return Err(ApiError::bad_request(format!(
+            "memo body must be at most {MEMO_BODY_MAX_LINES} lines"
+        )));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_optional_memo_body(body: &str) -> Result<Option<String>, ApiError> {
+    if body.trim().is_empty() {
+        Ok(None)
+    } else {
+        normalize_memo_body(body).map(Some)
+    }
 }
 
 fn now_unix() -> u64 {

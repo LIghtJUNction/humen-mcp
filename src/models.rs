@@ -811,6 +811,8 @@ struct WebhookConfig {
     #[serde(default)]
     weixin_context_token: Option<String>,
     #[serde(default)]
+    weixin_ready: bool,
+    #[serde(default)]
     weixin_last_request_id: Option<Uuid>,
     #[serde(default)]
     weixin_get_updates_buf: Option<String>,

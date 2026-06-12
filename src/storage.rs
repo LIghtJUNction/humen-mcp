@@ -708,13 +708,7 @@ fn db_create_human_memo_with_agent(
     author_agent_name: Option<&str>,
     body: &str,
 ) -> Result<HumanMemo, ApiError> {
-    let body = body.trim();
-    if body.is_empty() {
-        return Err(ApiError::bad_request("memo body is required"));
-    }
-    if body.chars().count() > 2000 {
-        return Err(ApiError::bad_request("memo body is too long"));
-    }
+    let body = normalize_memo_body(body)?;
     let memo = HumanMemo {
         id: Uuid::new_v4(),
         target_email: normalize_email(target_email),
@@ -729,6 +723,12 @@ fn db_create_human_memo_with_agent(
         .db
         .lock()
         .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    ensure_human_memo_unread_capacity(
+        &db,
+        &memo.target_email,
+        &memo.author_email,
+        memo.author_agent_id.as_deref(),
+    )?;
     db.execute(
         "INSERT INTO human_memos \
          (id, target_email, author_email, author_agent_id, author_agent_name, body, created_at, read_at) \
@@ -746,6 +746,31 @@ fn db_create_human_memo_with_agent(
     )
     .map_err(|err| ApiError::internal(format!("persist human memo: {err}")))?;
     Ok(memo)
+}
+
+fn ensure_human_memo_unread_capacity(
+    db: &Connection,
+    target_email: &str,
+    author_email: &str,
+    author_agent_id: Option<&str>,
+) -> Result<(), ApiError> {
+    let pending = db
+        .query_row(
+            "SELECT COUNT(*) \
+             FROM human_memos \
+             WHERE target_email = ?1 AND author_email = ?2 \
+               AND COALESCE(author_agent_id, '') = COALESCE(?3, '') \
+               AND read_at IS NULL",
+            params![target_email, author_email, author_agent_id],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(|err| ApiError::internal(format!("count unread human memos: {err}")))?;
+    if pending >= MEMO_UNREAD_LIMIT_PER_PAIR {
+        return Err(ApiError::bad_request(format!(
+            "memo inbox limit reached; wait for the recipient to read existing memos (limit {MEMO_UNREAD_LIMIT_PER_PAIR})"
+        )));
+    }
+    Ok(())
 }
 
 fn db_list_human_memos(
@@ -768,7 +793,7 @@ fn db_list_human_memos(
         )
         .map_err(|err| ApiError::internal(format!("prepare human memos query: {err}")))?;
     let rows = stmt
-        .query_map(params![target_email, limit.clamp(1, 100)], |row| {
+        .query_map(params![target_email, limit.clamp(1, HUMAN_MEMO_LIST_LIMIT)], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -876,7 +901,7 @@ fn db_touch_agent_connection(
     payload: &McpRequest,
 ) -> Result<AgentContext, ApiError> {
     let now = now_unix();
-    let (agent_id, name, description) = agent_client_identity(agent, headers, payload);
+    let (agent_id, name, description) = agent_client_identity(agent, headers, Some(payload));
     let last_tool = payload
         .params
         .get("name")
@@ -911,6 +936,41 @@ fn db_touch_agent_connection(
         params![agent_id, owner_email, name, description, last_tool, now],
     )
     .map_err(|err| ApiError::internal(format!("persist agent connection: {err}")))?;
+    let mut next = agent.clone();
+    next.agent_id = agent_id;
+    next.agent_name = name;
+    Ok(next)
+}
+
+fn db_touch_agent_presence(
+    state: &AppState,
+    agent: &AgentContext,
+    headers: &HeaderMap,
+) -> Result<AgentContext, ApiError> {
+    let now = now_unix();
+    let (agent_id, name, description) = agent_client_identity(agent, headers, None);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let owner_email = normalize_email(&agent.email);
+    db.execute(
+        "DELETE FROM agent_connections WHERE owner_email = ?1 AND id != ?2",
+        params![owner_email, agent_id],
+    )
+    .map_err(|err| ApiError::internal(format!("prune previous agent connection: {err}")))?;
+    db.execute(
+        "INSERT INTO agent_connections \
+         (id, owner_email, name, description, current_task, last_tool, first_seen_at, last_seen_at, last_request_at, request_count) \
+         VALUES (?1, ?2, ?3, ?4, '', 'mcp/sse', ?5, ?5, NULL, 0) \
+         ON CONFLICT(id) DO UPDATE SET \
+           owner_email=excluded.owner_email, \
+           name=excluded.name, \
+           description=excluded.description, \
+           last_seen_at=excluded.last_seen_at",
+        params![agent_id, owner_email, name, description, now],
+    )
+    .map_err(|err| ApiError::internal(format!("persist agent presence: {err}")))?;
     let mut next = agent.clone();
     next.agent_id = agent_id;
     next.agent_name = name;
@@ -1013,9 +1073,10 @@ fn db_list_connected_agents(
             &id,
             &human_email,
             Some("pending"),
-            10,
+            AGENT_PANEL_MESSAGES_LIMIT,
         )?;
         let reputation = agent_reputation_summary_from_db(&db, &id)?;
+        let online = last_seen_at >= online_after || state.mcp_streams.contains_key(&owner_email);
         agents.push(ConnectedAgent {
             id,
             owner_email,
@@ -1031,7 +1092,7 @@ fn db_list_connected_agents(
             reputation: reputation.reputation,
             ratings_count: reputation.ratings_count,
             reputation_breakdown: reputation.reputation_breakdown,
-            online: last_seen_at >= online_after,
+            online,
             relation_status: AgentRelationStatus::from_str(&relation_status),
             pending_messages,
         });
@@ -1054,21 +1115,6 @@ fn db_agent_exists(state: &AppState, agent_id: &str) -> Result<bool, ApiError> {
         .map_err(|err| ApiError::internal(format!("read agent connection: {err}")))?
         .is_some();
     Ok(exists)
-}
-
-fn db_agent_owner_email(state: &AppState, agent_id: &str) -> Result<String, ApiError> {
-    let db = state
-        .db
-        .lock()
-        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
-    db.query_row(
-        "SELECT owner_email FROM agent_connections WHERE id = ?1",
-        params![agent_id],
-        |row| row.get::<_, String>(0),
-    )
-    .optional()
-    .map_err(|err| ApiError::internal(format!("read agent owner: {err}")))?
-    .ok_or_else(|| ApiError::bad_request("agent not found"))
 }
 
 fn db_agent_relation_status(
@@ -1133,13 +1179,40 @@ fn db_accept_agent_friend(
     Ok(AgentRelationStatus::Friends)
 }
 
-fn db_create_agent_owner_memo(
+fn db_create_agent_memo_from_human(
     state: &AppState,
-    owner_email: &str,
-    author_email: &str,
+    agent_id: &str,
+    human_email: &str,
     body: &str,
-) -> Result<HumanMemo, ApiError> {
-    db_create_human_memo(state, owner_email, author_email, body)
+) -> Result<AgentHumanMessage, ApiError> {
+    let body = normalize_memo_body(body)?;
+    let human_email = normalize_email(human_email);
+    let now = now_unix();
+    let message = AgentHumanMessage {
+        id: Uuid::new_v4(),
+        agent_id: agent_id.to_string(),
+        human_email,
+        direction: "human_to_agent".to_string(),
+        kind: "memo".to_string(),
+        body,
+        status: "pending".to_string(),
+        created_at: now,
+        resolved_at: None,
+        read_at: None,
+    };
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    ensure_agent_message_pending_capacity(
+        &db,
+        &message.agent_id,
+        &message.human_email,
+        &message.direction,
+        &message.kind,
+    )?;
+    insert_agent_message_locked(&db, &message)?;
+    Ok(message)
 }
 
 fn db_list_agent_inbox(
@@ -1165,7 +1238,11 @@ fn db_list_agent_inbox(
         .map_err(|err| ApiError::internal(format!("prepare agent inbox: {err}")))?;
     let rows = stmt
         .query_map(
-            params![agent_id, if unread_only { 1 } else { 0 }, limit.clamp(1, 200)],
+            params![
+                agent_id,
+                if unread_only { 1 } else { 0 },
+                limit.clamp(1, AGENT_INBOX_LIMIT_MAX)
+            ],
             agent_message_from_row,
         )
         .map_err(|err| ApiError::internal(format!("query agent inbox: {err}")))?;
@@ -1199,6 +1276,7 @@ fn db_upsert_agent_relation(
     human_requested: bool,
 ) -> Result<AgentRelationStatus, ApiError> {
     let human_email = normalize_email(human_email);
+    let body = normalize_optional_memo_body(body)?;
     let now = now_unix();
     let db = state
         .db
@@ -1225,8 +1303,8 @@ fn db_upsert_agent_relation(
             agent_id,
             human_email,
             next.as_str(),
-            if human_requested { Some(body.trim()) } else { None },
-            if human_requested { None } else { Some(body.trim()) },
+            if human_requested { body.as_deref() } else { None },
+            if human_requested { None } else { body.as_deref() },
             now
         ],
     )
@@ -1241,11 +1319,7 @@ fn db_upsert_agent_relation(
             "agent_to_human".to_string()
         },
         kind: "friend_request".to_string(),
-        body: if body.trim().is_empty() {
-            "Friend request".to_string()
-        } else {
-            body.trim().chars().take(2000).collect()
-        },
+        body: body.unwrap_or_else(|| "Friend request".to_string()),
         status: if next == AgentRelationStatus::Friends {
             "resolved".to_string()
         } else {
@@ -1255,8 +1329,42 @@ fn db_upsert_agent_relation(
         resolved_at: (next == AgentRelationStatus::Friends).then_some(now),
         read_at: None,
     };
+    if message.status == "pending" {
+        ensure_agent_message_pending_capacity(
+            &db,
+            &message.agent_id,
+            &message.human_email,
+            &message.direction,
+            &message.kind,
+        )?;
+    }
     insert_agent_message_locked(&db, &message)?;
     Ok(next)
+}
+
+fn ensure_agent_message_pending_capacity(
+    db: &Connection,
+    agent_id: &str,
+    human_email: &str,
+    direction: &str,
+    kind: &str,
+) -> Result<(), ApiError> {
+    let pending = db
+        .query_row(
+            "SELECT COUNT(*) \
+             FROM agent_human_messages \
+             WHERE agent_id = ?1 AND human_email = ?2 AND direction = ?3 \
+               AND kind = ?4 AND status = 'pending' AND read_at IS NULL",
+            params![agent_id, human_email, direction, kind],
+            |row| row.get::<_, u64>(0),
+        )
+        .map_err(|err| ApiError::internal(format!("count pending agent messages: {err}")))?;
+    if pending >= MEMO_UNREAD_LIMIT_PER_PAIR {
+        return Err(ApiError::bad_request(format!(
+            "agent inbox limit reached; wait for the agent to read existing memos (limit {MEMO_UNREAD_LIMIT_PER_PAIR})"
+        )));
+    }
+    Ok(())
 }
 
 fn agent_relation_status_locked(
@@ -1357,9 +1465,9 @@ fn agent_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentHuma
 fn agent_client_identity(
     agent: &AgentContext,
     headers: &HeaderMap,
-    payload: &McpRequest,
+    payload: Option<&McpRequest>,
 ) -> (String, String, String) {
-    let client_info = payload.params.get("clientInfo");
+    let client_info = payload.and_then(|payload| payload.params.get("clientInfo"));
     let client_name = client_info
         .and_then(|value| value.get("name"))
         .and_then(Value::as_str)

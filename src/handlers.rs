@@ -338,16 +338,17 @@ async fn create_agent_ask_me_request(
     Path(id): Path<String>,
     headers: HeaderMap,
     Json(payload): Json<AgentAskMeArgs>,
-) -> Result<Json<HumanMemo>, ApiError> {
+) -> Result<Json<AgentHumanMessage>, ApiError> {
     let session = require_session(&state, &headers)?;
-    let owner_email = db_agent_owner_email(&state, &id)?;
+    if !db_agent_exists(&state, &id)? {
+        return Err(ApiError::bad_request("agent not found"));
+    }
     let body = normalize_optional_value(Some(payload.body.as_str()))
         .or_else(|| normalize_optional_value(Some(payload.prompt.as_str())))
         .or_else(|| normalize_optional_value(Some(payload.title.as_str())))
         .ok_or_else(|| ApiError::bad_request("memo body is required"))?;
-    let memo = db_create_agent_owner_memo(&state, &owner_email, &session.user.email, &body)?;
-    let _ = state.events.send(ServerEvent::MemoCreated { memo: memo.clone() });
-    Ok(Json(memo))
+    let message = db_create_agent_memo_from_human(&state, &id, &session.user.email, &body)?;
+    Ok(Json(message))
 }
 
 async fn rate_agent(

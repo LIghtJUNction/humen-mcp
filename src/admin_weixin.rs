@@ -110,7 +110,9 @@ async fn admin_weixin_login_status(
         "confirmed" => {
             webhook.enabled = true;
             webhook.weixin_status = Some("confirmed".to_string());
-            webhook.weixin_status_message = Some("已扫码登录，可通过微信回复 MCP 请求".to_string());
+            webhook.weixin_status_message = Some(
+                "已扫码登录。请先向这个机器人发送任意一条微信消息，以完成通知绑定。".to_string(),
+            );
             webhook.weixin_bot_token = normalize_optional_value(status.bot_token.as_deref());
             webhook.weixin_account_id = normalize_optional_value(status.ilink_bot_id.as_deref());
             webhook.weixin_user_id = normalize_optional_value(status.ilink_user_id.as_deref());
@@ -118,6 +120,7 @@ async fn admin_weixin_login_status(
             webhook.weixin_qrcode = None;
             webhook.weixin_qrcode_url = None;
             webhook.weixin_context_token = None;
+            webhook.weixin_ready = false;
             webhook.weixin_last_request_id = None;
             webhook.weixin_get_updates_buf = None;
             webhook.weixin_last_error = None;
@@ -165,6 +168,7 @@ async fn admin_weixin_logout(
         webhook.weixin_base_url = None;
         webhook.weixin_user_id = None;
         webhook.weixin_context_token = None;
+        webhook.weixin_ready = false;
         webhook.weixin_last_request_id = None;
         webhook.weixin_get_updates_buf = None;
         webhook.weixin_last_error = None;

@@ -250,5 +250,6 @@ async fn mcp_get(State(state): State<AppState>, headers: HeaderMap) -> Result<Re
             .into_response());
     }
     let agent = require_agent_access(&state, &headers)?;
+    let agent = db_touch_agent_presence(&state, &agent, &headers)?;
     Ok(mcp_sse(state, agent).into_response())
 }

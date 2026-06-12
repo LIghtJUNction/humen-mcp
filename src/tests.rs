@@ -1368,6 +1368,67 @@ tags = ["ops", "#cn"]
     }
 
     #[test]
+    fn active_mcp_sse_stream_keeps_agent_online_after_request_window() {
+        let state = test_state();
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: String::new(),
+            agent_name: String::new(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-humen-agent-id", "codex-local".parse().unwrap());
+        headers.insert("x-humen-agent-name", "Codex".parse().unwrap());
+        let payload = McpRequest {
+            jsonrpc: Some("2.0".to_string()),
+            id: Some(json!(1)),
+            method: "initialize".to_string(),
+            params: json!({}),
+        };
+        db_touch_agent_connection(&state, &agent, &headers, &payload).unwrap();
+        {
+            let db = state.db.lock().unwrap();
+            db.execute(
+                "UPDATE agent_connections SET last_seen_at = ?1 WHERE owner_email = ?2",
+                params![now_unix().saturating_sub(1000), "alice@example.com"],
+            )
+            .unwrap();
+        }
+
+        let listed = db_list_connected_agents(&state, "bob@example.com", 20).unwrap();
+        assert!(!listed[0].online);
+
+        state
+            .mcp_streams
+            .insert("alice@example.com".to_string(), Uuid::new_v4());
+        let listed = db_list_connected_agents(&state, "bob@example.com", 20).unwrap();
+        assert!(listed[0].online);
+    }
+
+    #[test]
+    fn sse_presence_does_not_increment_agent_request_count() {
+        let state = test_state();
+        let agent = AgentContext {
+            email: "alice@example.com".to_string(),
+            agent_id: String::new(),
+            agent_name: String::new(),
+            directory_visibility: AgentDirectoryVisibility::SelfOnly,
+            directory_min_reputation: default_agent_directory_min_reputation(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-humen-agent-id", "codex-local".parse().unwrap());
+        headers.insert("x-humen-agent-name", "Codex".parse().unwrap());
+        let touched = db_touch_agent_presence(&state, &agent, &headers).unwrap();
+        assert_eq!(touched.agent_name, "Codex");
+
+        let listed = db_list_connected_agents(&state, "bob@example.com", 20).unwrap();
+        assert_eq!(listed[0].request_count, 0);
+        assert_eq!(listed[0].last_request_at, None);
+        assert_eq!(listed[0].last_tool, "mcp/sse");
+    }
+
+    #[test]
     fn agent_friend_request_to_human_can_be_accepted_by_human() {
         let state = test_state();
         let agent_id = "agent-123";
@@ -1561,6 +1622,17 @@ tags = ["ops", "#cn"]
             .unwrap()
             .is_none());
         assert!(state.requests.contains_key(&request.id));
+    }
+
+    #[test]
+    fn weixin_ready_requires_user_and_context_tokens() {
+        let mut webhook = test_webhook(String::new());
+        webhook.weixin_bot_token = Some("bot-token".to_string());
+        webhook.weixin_user_id = Some("user-id".to_string());
+        assert!(!weixin_webhook_ready(&webhook));
+
+        webhook.weixin_context_token = Some("context-token".to_string());
+        assert!(weixin_webhook_ready(&webhook));
     }
 
     #[test]
@@ -1769,7 +1841,7 @@ tags = ["ops", "#cn"]
     }
 
     #[test]
-    fn agent_ask_me_writes_a_memo_for_the_bound_user() {
+    fn human_agent_memo_writes_to_agent_inbox() {
         let state = test_state();
         {
             let db = state.db.lock().unwrap();
@@ -1782,13 +1854,17 @@ tags = ["ops", "#cn"]
             .unwrap();
         }
 
-        let owner = db_agent_owner_email(&state, "agent-1").unwrap();
-        assert_eq!(owner, "alice@example.com");
-        let memo = db_create_agent_owner_memo(&state, &owner, "bob@example.com", "Ping the owner.")
+        let message = db_create_agent_memo_from_human(&state, "agent-1", "bob@example.com", "Ping the agent.")
             .unwrap();
-        assert_eq!(memo.target_email, "alice@example.com");
-        assert_eq!(memo.author_email, "bob@example.com");
-        assert_eq!(memo.body, "Ping the owner.");
+        assert_eq!(message.agent_id, "agent-1");
+        assert_eq!(message.human_email, "bob@example.com");
+        assert_eq!(message.direction, "human_to_agent");
+        assert_eq!(message.kind, "memo");
+        assert_eq!(message.body, "Ping the agent.");
+
+        let inbox = db_list_agent_inbox(&state, "agent-1", false, false, 10).unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].id, message.id);
     }
 
     #[test]
@@ -2231,6 +2307,7 @@ tags = ["ops", "#cn"]
             weixin_base_url: None,
             weixin_user_id: None,
             weixin_context_token: None,
+            weixin_ready: false,
             weixin_last_request_id: None,
             weixin_get_updates_buf: None,
             weixin_last_error: None,

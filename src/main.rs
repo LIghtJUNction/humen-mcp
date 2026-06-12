@@ -6,39 +6,39 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Context;
 use axum::{
+    Json, Router,
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
         Path, Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Redirect, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
-    Json, Router,
 };
-use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use clap::{Args, Parser, Subcommand};
 use dashmap::DashMap;
-use futures_util::{stream, StreamExt};
+use futures_util::{StreamExt, stream};
 use humen_mcp_sdk::{HumenPluginManifest, HumenTaskKind, RequestTemplate};
 #[cfg(test)]
 use humen_mcp_sdk::{RouteStrategy, ScoringRule, ThirdPartyChannel};
-use qrcode::{render::svg, QrCode};
-use rand::{distr::Alphanumeric, Rng};
+use qrcode::{QrCode, render::svg};
+use rand::{Rng, distr::Alphanumeric};
 use reqwest::Client;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{
     process::Command as TokioCommand,
@@ -62,6 +62,12 @@ const WEIXIN_CLIENT_VERSION: &str = "1";
 const WEIXIN_DEFAULT_POLL_TIMEOUT_MS: u64 = 35_000;
 const WEIXIN_DEFAULT_API_TIMEOUT_MS: u64 = 15_000;
 const ADMIN_TAG: &str = "#admin";
+const MEMO_BODY_MAX_CHARS: usize = 1200;
+const MEMO_BODY_MAX_LINES: usize = 30;
+const MEMO_UNREAD_LIMIT_PER_PAIR: u64 = 25;
+const HUMAN_MEMO_LIST_LIMIT: u64 = 50;
+const AGENT_INBOX_LIMIT_MAX: u64 = 100;
+const AGENT_PANEL_MESSAGES_LIMIT: u64 = 25;
 
 include!("app_core.rs");
 include!("models.rs");

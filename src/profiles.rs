@@ -918,6 +918,7 @@ fn sanitize_admin_settings(mut settings: AdminSettings) -> AdminSettings {
         webhook.weixin_user_id = normalize_optional_value(webhook.weixin_user_id.as_deref());
         webhook.weixin_context_token =
             normalize_optional_value(webhook.weixin_context_token.as_deref());
+        webhook.weixin_ready = weixin_webhook_ready(webhook);
         webhook.weixin_get_updates_buf =
             normalize_optional_value(webhook.weixin_get_updates_buf.as_deref());
         webhook.weixin_last_error = normalize_optional_value(webhook.weixin_last_error.as_deref());

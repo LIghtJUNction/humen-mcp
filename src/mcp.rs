@@ -1130,7 +1130,7 @@ fn list_agent_inbox_schema() -> Value {
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "maximum": 200,
+                "maximum": AGENT_INBOX_LIMIT_MAX,
                 "default": 100
             }
         }
@@ -1186,7 +1186,10 @@ fn request_human_friend_schema() -> Value {
         "required": ["human_email"],
         "properties": {
             "human_email": { "type": "string" },
-            "message": { "type": "string" }
+            "message": {
+                "type": "string",
+                "maxLength": MEMO_BODY_MAX_CHARS
+            }
         }
     })
 }
@@ -1202,6 +1205,7 @@ fn leave_humen_memo_schema() -> Value {
             },
             "body": {
                 "type": "string",
+                "maxLength": MEMO_BODY_MAX_CHARS,
                 "description": "Offline memo or short-term context."
             }
         }

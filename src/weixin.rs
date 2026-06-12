@@ -106,6 +106,12 @@ fn weixin_message_is_from_bot(raw: &Value, webhook: &WebhookConfig) -> bool {
     weixin_message_user_id(raw).is_some_and(|sender| normalize_email(&sender) == normalize_email(&account_id))
 }
 
+fn weixin_webhook_ready(webhook: &WebhookConfig) -> bool {
+    normalize_optional_value(webhook.weixin_bot_token.as_deref()).is_some()
+        && normalize_optional_value(webhook.weixin_user_id.as_deref()).is_some()
+        && normalize_optional_value(webhook.weixin_context_token.as_deref()).is_some()
+}
+
 fn handle_weixin_incoming_message(state: &AppState, webhook: &WebhookConfig, message: &Value) {
     if weixin_message_is_from_bot(message, webhook) {
         return;
@@ -368,7 +374,7 @@ async fn send_weixin_request_notification(
         .ok_or_else(|| ApiError::bad_request("Weixin target user id is missing"))?;
     let context_token = normalize_optional_value(webhook.weixin_context_token.as_deref()).ok_or_else(|| {
         ApiError::bad_request(
-            "Weixin context_token is missing; send one message to this bot first, then retry the MCP request",
+            "微信通知还未完成绑定：请先向这个机器人发送任意一条微信消息，然后重试 MCP 请求",
         )
     })?;
     let text = format_weixin_request_notification(&state, &webhook, request);
@@ -423,6 +429,7 @@ async fn send_weixin_request_notification(
                 stored.weixin_status_message = Some("微信登录态已失效，请重新扫码登录".to_string());
                 stored.weixin_bot_token = None;
                 stored.weixin_context_token = None;
+                stored.weixin_ready = false;
                 stored.weixin_last_request_id = None;
                 stored.weixin_get_updates_buf = None;
                 stored.weixin_last_error = Some("Weixin bot token expired".to_string());
@@ -439,6 +446,7 @@ async fn send_weixin_request_notification(
     update_webhook_config(&state, webhook.id, |stored| {
         stored.weixin_status = Some("confirmed".to_string());
         stored.weixin_status_message = Some("已发送 MCP 请求到微信".to_string());
+        stored.weixin_ready = true;
         stored.weixin_last_request_id = Some(request.id);
         stored.weixin_last_error = None;
     })?;
@@ -785,6 +793,7 @@ async fn poll_weixin_updates_once(state: AppState, webhook: WebhookConfig) -> Re
                 stored.weixin_status_message = Some("微信登录态已失效，请重新扫码登录".to_string());
                 stored.weixin_bot_token = None;
                 stored.weixin_context_token = None;
+                stored.weixin_ready = false;
                 stored.weixin_last_request_id = None;
                 stored.weixin_get_updates_buf = None;
                 stored.weixin_last_error = Some("Weixin bot token expired".to_string());
@@ -835,7 +844,12 @@ async fn poll_weixin_updates_once(state: AppState, webhook: WebhookConfig) -> Re
             stored.weixin_user_id = Some(user_id);
         }
         stored.weixin_status = Some("confirmed".to_string());
-        stored.weixin_status_message = Some("已扫码登录，可通过微信回复 MCP 请求".to_string());
+        stored.weixin_ready = weixin_webhook_ready(stored);
+        stored.weixin_status_message = Some(if stored.weixin_ready {
+            "微信通知已就绪，可接收并回复 MCP 请求".to_string()
+        } else {
+            "已扫码登录。请先向这个机器人发送任意一条微信消息，以完成通知绑定。".to_string()
+        });
         if stored
             .weixin_last_error
             .as_deref()
