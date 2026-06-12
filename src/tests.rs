@@ -235,6 +235,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn web_answers_record_web_channel_source() {
+        let state = test_state();
+        {
+            let mut users = state.users.lock().unwrap();
+            users.insert(new_user_record("bob@example.com", 1, "Bob"));
+        }
+        let auth = state.create_session("bob@example.com", AuthProvider::Password);
+        let mut request = test_human_request();
+        request.assigned_to = Some("bob@example.com".to_string());
+        state.requests.insert(request.id, request.clone());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            format!("Bearer {}", auth.token).parse().unwrap(),
+        );
+        let response = answer_request(
+            State(state.clone()),
+            Path(request.id),
+            headers,
+            Json(AnswerRequest {
+                answer: "web ok".to_string(),
+                note: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response["answer"]["answered_by"], "web:bob@example.com");
+
+        let replies = db_list_answered_requests(&state, 10).unwrap();
+        assert_eq!(replies[0].answer.answered_by, "web:bob@example.com");
+    }
+
+    #[tokio::test]
     async fn mcp_get_without_sse_accept_keeps_method_warning() {
         let response = mcp_get(State(test_state()), HeaderMap::new()).await.unwrap();
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);

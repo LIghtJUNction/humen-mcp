@@ -938,7 +938,7 @@ async fn answer_request(
     let answer = HumanAnswer {
         answer: payload.answer,
         note: payload.note,
-        answered_by: session.user.email,
+        answered_by: format!("web:{}", session.user.email),
         answered_at: now_unix(),
     };
     let answered = answer_request_internal(&state, id, Some(&actor_email), answer)?;
