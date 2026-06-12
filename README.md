@@ -87,7 +87,7 @@ Email/password login is only for the administrator account. The admin password i
 
 ```mermaid
 flowchart LR
-    A[Agent] -->|calls MCP tool| B[/POST /mcp]
+    A[Agent] -->|calls MCP tool| B["POST /mcp"]
     B --> C[Task envelope]
     C --> D[Human workbench]
     D -->|answer| E[Result or reply mailbox]
