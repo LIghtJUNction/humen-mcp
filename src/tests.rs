@@ -229,6 +229,11 @@ mod tests {
             json!(HUMEN_REPLY_AVAILABLE_NOTIFICATION)
         );
         assert_eq!(
+            payload["result"]["capabilities"]["experimental"]["humenNotifications"]
+                ["agentInboxChangedMethod"],
+            json!(HUMEN_AGENT_INBOX_CHANGED_NOTIFICATION)
+        );
+        assert_eq!(
             payload["result"]["capabilities"]["experimental"]["humenNotifications"]["fallbackTool"],
             json!("read_humen_replies")
         );
@@ -314,7 +319,30 @@ mod tests {
             answered_late: false,
         };
 
-        assert!(mcp_sse_event(&state, "alice@example.com", &event).is_some());
+        assert!(mcp_sse_event(&state, "alice@example.com", "agent-1", &event).is_some());
+    }
+
+    #[test]
+    fn agent_inbox_notification_reaches_target_agent_stream() {
+        let state = test_state();
+        let message = AgentHumanMessage {
+            id: Uuid::new_v4(),
+            agent_id: "agent-1".to_string(),
+            human_email: "bob@example.com".to_string(),
+            direction: "human_to_agent".to_string(),
+            kind: "friend_request".to_string(),
+            body: "please connect".to_string(),
+            status: "pending".to_string(),
+            created_at: now_unix(),
+            resolved_at: None,
+            read_at: None,
+        };
+        let event = ServerEvent::AgentInboxChanged {
+            message: message.clone(),
+        };
+
+        assert!(mcp_sse_event(&state, "alice@example.com", "agent-1", &event).is_some());
+        assert!(mcp_sse_event(&state, "alice@example.com", "other-agent", &event).is_none());
     }
 
     #[test]
@@ -1336,9 +1364,11 @@ tags = ["ops", "#cn"]
         assert_eq!(listed[0].current_task, "Implement agents panel");
         assert_eq!(listed[0].relation_status, AgentRelationStatus::None);
 
-        let status = db_request_agent_friend(&state, &agent.agent_id, "bob@example.com", "hi")
+        let (status, message) = db_request_agent_friend(&state, &agent.agent_id, "bob@example.com", "hi")
             .unwrap();
         assert_eq!(status, AgentRelationStatus::HumanRequested);
+        assert_eq!(message.direction, "human_to_agent");
+        assert_eq!(message.read_at, None);
         let inbox = db_list_agent_inbox(&state, &agent.agent_id, false, false, 20).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].kind, "friend_request");
@@ -1363,8 +1393,12 @@ tags = ["ops", "#cn"]
                 .unwrap_err();
         assert_eq!(own_agent.message, "cannot rate your own agent");
 
-        let accepted = db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
+        let (accepted, messages) =
+            db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
         assert_eq!(accepted, AgentRelationStatus::Friends);
+        assert!(messages
+            .iter()
+            .any(|message| message.kind == "friend_request" && message.status == "resolved"));
     }
 
     #[test]
@@ -1482,7 +1516,7 @@ tags = ["ops", "#cn"]
             params: json!({}),
         };
         let agent = db_touch_agent_connection(&state, &agent, &headers, &payload).unwrap();
-        let status = db_request_human_friend_from_agent(
+        let (status, message) = db_request_human_friend_from_agent(
             &state,
             &agent.agent_id,
             "bob@example.com",
@@ -1490,14 +1524,19 @@ tags = ["ops", "#cn"]
         )
         .unwrap();
         assert_eq!(status, AgentRelationStatus::AgentRequested);
+        assert_eq!(message.direction, "agent_to_human");
 
         let listed = db_list_connected_agents(&state, "bob@example.com", 20).unwrap();
         assert_eq!(listed[0].relation_status, AgentRelationStatus::AgentRequested);
         assert_eq!(listed[0].pending_messages.len(), 1);
         assert_eq!(listed[0].pending_messages[0].direction, "agent_to_human");
 
-        let accepted = db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
+        let (accepted, messages) =
+            db_accept_agent_friend(&state, &agent.agent_id, "bob@example.com").unwrap();
         assert_eq!(accepted, AgentRelationStatus::Friends);
+        assert!(messages
+            .iter()
+            .any(|message| message.direction == "agent_to_human" && message.status == "resolved"));
     }
 
     #[test]
@@ -1523,8 +1562,11 @@ tags = ["ops", "#cn"]
         let target =
             resolve_human_for_agent_friend_accept(&state, &agent, "bob@example.com").unwrap();
         assert_eq!(target, "bob@example.com");
-        let accepted = db_accept_agent_friend(&state, &agent.agent_id, &target).unwrap();
+        let (accepted, messages) = db_accept_agent_friend(&state, &agent.agent_id, &target).unwrap();
         assert_eq!(accepted, AgentRelationStatus::Friends);
+        assert!(messages
+            .iter()
+            .any(|message| message.direction == "human_to_agent" && message.status == "resolved"));
     }
 
     #[test]

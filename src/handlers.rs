@@ -312,8 +312,12 @@ async fn create_agent_friend_request(
     if !db_agent_exists(&state, &id)? {
         return Err(ApiError::bad_request("agent not found"));
     }
-    let status = db_request_agent_friend(&state, &id, &session.user.email, &payload.body)?;
-    Ok(Json(json!({ "ok": true, "relation_status": status })))
+    let (status, message) =
+        db_request_agent_friend(&state, &id, &session.user.email, &payload.body)?;
+    let _ = state
+        .events
+        .send(ServerEvent::AgentInboxChanged { message: message.clone() });
+    Ok(Json(json!({ "ok": true, "relation_status": status, "message": message })))
 }
 
 async fn accept_agent_friend_request(
@@ -329,7 +333,10 @@ async fn accept_agent_friend_request(
     if status != AgentRelationStatus::AgentRequested && status != AgentRelationStatus::Friends {
         return Err(ApiError::bad_request("agent friend request not found"));
     }
-    let status = db_accept_agent_friend(&state, &id, &session.user.email)?;
+    let (status, messages) = db_accept_agent_friend(&state, &id, &session.user.email)?;
+    for message in messages {
+        let _ = state.events.send(ServerEvent::AgentInboxChanged { message });
+    }
     Ok(Json(json!({ "ok": true, "relation_status": status })))
 }
 
@@ -348,6 +355,9 @@ async fn create_agent_ask_me_request(
         .or_else(|| normalize_optional_value(Some(payload.title.as_str())))
         .ok_or_else(|| ApiError::bad_request("memo body is required"))?;
     let message = db_create_agent_memo_from_human(&state, &id, &session.user.email, &body)?;
+    let _ = state
+        .events
+        .send(ServerEvent::AgentInboxChanged { message: message.clone() });
     Ok(Json(message))
 }
 

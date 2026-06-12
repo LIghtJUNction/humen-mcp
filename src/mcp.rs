@@ -1,4 +1,5 @@
 const HUMEN_REPLY_AVAILABLE_NOTIFICATION: &str = "notifications/humen/reply_available";
+const HUMEN_AGENT_INBOX_CHANGED_NOTIFICATION: &str = "notifications/humen/agent_inbox_changed";
 
 async fn mcp(
     State(state): State<AppState>,
@@ -34,6 +35,7 @@ async fn mcp(
                     "humenNotifications": {
                         "transport": "streamable-http-sse",
                         "replyAvailableMethod": HUMEN_REPLY_AVAILABLE_NOTIFICATION,
+                        "agentInboxChangedMethod": HUMEN_AGENT_INBOX_CHANGED_NOTIFICATION,
                         "fallbackTool": "read_humen_replies"
                     }
                 }
@@ -204,6 +206,7 @@ async fn mcp(
 struct McpSseStreamState {
     state: AppState,
     agent_email: String,
+    agent_id: String,
     stream_id: Uuid,
     events: broadcast::Receiver<ServerEvent>,
     shutdown: broadcast::Receiver<()>,
@@ -231,6 +234,7 @@ fn mcp_sse(
     agent: AgentContext,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let agent_email = normalize_email(&agent.email);
+    let agent_id = agent.agent_id.clone();
     let stream_id = Uuid::new_v4();
     state.mcp_streams.insert(agent_email.clone(), stream_id);
     let stream_state = McpSseStreamState {
@@ -238,6 +242,7 @@ fn mcp_sse(
         shutdown: state.shutdown.subscribe(),
         state,
         agent_email,
+        agent_id,
         stream_id,
     };
     let stream = stream::unfold(stream_state, |mut stream_state| async move {
@@ -253,7 +258,12 @@ fn mcp_sse(
                             if !is_active_mcp_stream(&stream_state.state, &stream_state.agent_email, stream_state.stream_id) {
                                 continue;
                             }
-                            let Some(event) = mcp_sse_event(&stream_state.state, &stream_state.agent_email, &event) else {
+                            let Some(event) = mcp_sse_event(
+                                &stream_state.state,
+                                &stream_state.agent_email,
+                                &stream_state.agent_id,
+                                &event,
+                            ) else {
                                 continue;
                             };
                             return Some((Ok(event), stream_state));
@@ -288,7 +298,12 @@ fn cleanup_mcp_stream(state: &AppState, agent_email: &str, stream_id: Uuid) {
     }
 }
 
-fn mcp_sse_event(state: &AppState, agent_email: &str, event: &ServerEvent) -> Option<Event> {
+fn mcp_sse_event(
+    state: &AppState,
+    agent_email: &str,
+    agent_id: &str,
+    event: &ServerEvent,
+) -> Option<Event> {
     match event {
         ServerEvent::RequestAnswered {
             id,
@@ -306,6 +321,17 @@ fn mcp_sse_event(state: &AppState, agent_email: &str, event: &ServerEvent) -> Op
                     .data(message.to_string()),
             )
         }
+        ServerEvent::AgentInboxChanged { message }
+            if message.agent_id == agent_id && message.direction == "human_to_agent" =>
+        {
+            let notification = mcp_agent_inbox_changed_notification(message);
+            Some(
+                Event::default()
+                    .event("message")
+                    .id(format!("agent-inbox-changed-{}", message.id))
+                    .data(notification.to_string()),
+            )
+        }
         _ => None,
     }
 }
@@ -320,6 +346,21 @@ fn mcp_reply_available_notification(id: Uuid, request: &HumanRequest, answered_l
             "answered_late": answered_late,
             "reply_tool": "read_humen_replies",
             "fallback_tool": "read_humen_replies"
+        }
+    })
+}
+
+fn mcp_agent_inbox_changed_notification(message: &AgentHumanMessage) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "method": HUMEN_AGENT_INBOX_CHANGED_NOTIFICATION,
+        "params": {
+            "message_id": message.id,
+            "kind": message.kind,
+            "status": message.status,
+            "read_at": message.read_at,
+            "inbox_tool": "list_agent_inbox",
+            "fallback_tool": "list_agent_inbox"
         }
     })
 }
@@ -494,15 +535,23 @@ async fn call_tool(
             let args: ListAgentInboxArgs = serde_json::from_value(arguments).map_err(|err| {
                 ApiError::bad_request(format!("invalid list_agent_inbox arguments: {err}"))
             })?;
+            let messages = db_list_agent_inbox(
+                &state,
+                &agent.agent_id,
+                args.unread_only,
+                args.mark_read,
+                args.limit.unwrap_or(100),
+            )?;
+            if args.mark_read {
+                for message in &messages {
+                    let _ = state
+                        .events
+                        .send(ServerEvent::AgentInboxChanged { message: message.clone() });
+                }
+            }
             Ok(Json(mcp_text_result(
                 id,
-                json!({ "messages": db_list_agent_inbox(
-                    &state,
-                    &agent.agent_id,
-                    args.unread_only,
-                    args.mark_read,
-                    args.limit.unwrap_or(100)
-                )? }),
+                json!({ "messages": messages }),
             )))
         }
         "request_human_friend" => {
@@ -515,15 +564,18 @@ async fn call_tool(
                 ApiError::bad_request(format!("invalid request_human_friend arguments: {err}"))
             })?;
             let human = resolve_visible_human_for_agent(&state, &agent, &args.human_email)?;
-            let status = db_request_human_friend_from_agent(
+            let (status, message) = db_request_human_friend_from_agent(
                 &state,
                 &agent.agent_id,
                 &human,
                 &args.message,
             )?;
+            let _ = state
+                .events
+                .send(ServerEvent::AgentInboxChanged { message: message.clone() });
             Ok(Json(mcp_text_result(
                 id,
-                json!({ "ok": true, "human_email": human, "relation_status": status }),
+                json!({ "ok": true, "human_email": human, "relation_status": status, "message": message }),
             )))
         }
         "accept_human_friend" => {
@@ -536,7 +588,10 @@ async fn call_tool(
                 ApiError::bad_request(format!("invalid accept_human_friend arguments: {err}"))
             })?;
             let human = resolve_human_for_agent_friend_accept(&state, &agent, &args.human_email)?;
-            let status = db_accept_agent_friend(&state, &agent.agent_id, &human)?;
+            let (status, messages) = db_accept_agent_friend(&state, &agent.agent_id, &human)?;
+            for message in messages {
+                let _ = state.events.send(ServerEvent::AgentInboxChanged { message });
+            }
             Ok(Json(mcp_text_result(
                 id,
                 json!({ "ok": true, "human_email": human, "relation_status": status }),

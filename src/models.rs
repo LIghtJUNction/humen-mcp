@@ -516,6 +516,9 @@ enum ServerEvent {
     MemoCreated {
         memo: HumanMemo,
     },
+    AgentInboxChanged {
+        message: AgentHumanMessage,
+    },
     TaskCreated {
         task: AgentTask,
     },

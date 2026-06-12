@@ -118,6 +118,9 @@ fn can_receive_event(state: &AppState, email: &str, event: &ServerEvent) -> bool
             expired_request, ..
         } => can_access_request(state, email, &expired_request.request),
         ServerEvent::MemoCreated { memo } => same_user_identity(state, &memo.target_email, email),
+        ServerEvent::AgentInboxChanged { message } => {
+            same_user_identity(state, &message.human_email, email)
+        }
         ServerEvent::TaskCreated { task } | ServerEvent::TaskUpdated { task } => {
             same_user_identity(state, &task.assigned_to, email)
         }

@@ -1134,7 +1134,7 @@ fn db_request_agent_friend(
     agent_id: &str,
     human_email: &str,
     body: &str,
-) -> Result<AgentRelationStatus, ApiError> {
+) -> Result<(AgentRelationStatus, AgentHumanMessage), ApiError> {
     db_upsert_agent_relation(state, agent_id, human_email, body, true)
 }
 
@@ -1143,7 +1143,7 @@ fn db_request_human_friend_from_agent(
     agent_id: &str,
     human_email: &str,
     body: &str,
-) -> Result<AgentRelationStatus, ApiError> {
+) -> Result<(AgentRelationStatus, AgentHumanMessage), ApiError> {
     db_upsert_agent_relation(state, agent_id, human_email, body, false)
 }
 
@@ -1151,7 +1151,7 @@ fn db_accept_agent_friend(
     state: &AppState,
     agent_id: &str,
     human_email: &str,
-) -> Result<AgentRelationStatus, ApiError> {
+) -> Result<(AgentRelationStatus, Vec<AgentHumanMessage>), ApiError> {
     let human_email = normalize_email(human_email);
     let now = now_unix();
     let db = state
@@ -1176,7 +1176,14 @@ fn db_accept_agent_friend(
         params![agent_id, human_email, now],
     )
     .map_err(|err| ApiError::internal(format!("resolve agent friend messages: {err}")))?;
-    Ok(AgentRelationStatus::Friends)
+    let messages = db_list_agent_messages_for_human_locked(
+        &db,
+        agent_id,
+        &human_email,
+        None,
+        AGENT_PANEL_MESSAGES_LIMIT,
+    )?;
+    Ok((AgentRelationStatus::Friends, messages))
 }
 
 fn db_create_agent_memo_from_human(
@@ -1274,7 +1281,7 @@ fn db_upsert_agent_relation(
     human_email: &str,
     body: &str,
     human_requested: bool,
-) -> Result<AgentRelationStatus, ApiError> {
+) -> Result<(AgentRelationStatus, AgentHumanMessage), ApiError> {
     let human_email = normalize_email(human_email);
     let body = normalize_optional_memo_body(body)?;
     let now = now_unix();
@@ -1339,7 +1346,7 @@ fn db_upsert_agent_relation(
         )?;
     }
     insert_agent_message_locked(&db, &message)?;
-    Ok(next)
+    Ok((next, message))
 }
 
 fn ensure_agent_message_pending_capacity(
