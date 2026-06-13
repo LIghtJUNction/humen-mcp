@@ -539,6 +539,9 @@ fn answer_weixin_message(
     if answer_text.is_empty() {
         return Ok(None);
     }
+    if is_weixin_request_notification_echo(answer_text) {
+        return Ok(None);
+    }
     let Some(request_id) = resolve_weixin_answer_target(state, webhook, incoming)? else {
         return Ok(None);
     };
@@ -557,6 +560,14 @@ fn answer_weixin_message(
         answered_at: now_unix(),
     };
     answer_request_internal(state, request_id, None, answer).map(Some)
+}
+
+fn is_weixin_request_notification_echo(text: &str) -> bool {
+    let text = text.trim_start();
+    text.starts_with("[humen:")
+        && text.contains("有新的 Agent 请求")
+        && text.contains("请求ID：")
+        && text.contains("直接回复本消息就是回答")
 }
 
 fn resolve_weixin_answer_target(

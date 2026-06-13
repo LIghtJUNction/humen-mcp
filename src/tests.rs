@@ -1626,6 +1626,32 @@ tags = ["ops", "#cn"]
     }
 
     #[test]
+    fn weixin_request_notification_echo_is_not_recorded_as_answer() {
+        let state = test_state();
+        let mut webhook = test_webhook(
+            "直接回复本消息就是回答。\n请求ID：{request_id}\n短ID：{short_id}".to_string(),
+        );
+        webhook.assigned_to = Some("alice@example.com".to_string());
+        let mut request = test_human_request();
+        request.assigned_to = Some("alice@example.com".to_string());
+        state.requests.insert(request.id, request.clone());
+
+        let outgoing_text = format_weixin_request_notification(&state, &webhook, &request);
+        let incoming = IncomingMessage {
+            source: "wechat".to_string(),
+            sender: "bot-account".to_string(),
+            content: outgoing_text,
+            raw: json!({}),
+        };
+
+        assert!(answer_weixin_message(&state, &webhook, &incoming)
+            .unwrap()
+            .is_none());
+        assert!(state.requests.contains_key(&request.id));
+        assert!(db_get_request(&state, request.id).unwrap().is_none());
+    }
+
+    #[test]
     fn non_admin_webhook_save_is_limited_to_own_weixin_connection() {
         let state = test_state();
         let mut generic = test_webhook(String::new());
