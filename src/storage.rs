@@ -1222,6 +1222,37 @@ fn db_create_agent_memo_from_human(
     Ok(message)
 }
 
+fn db_update_agent_message_from_human(
+    state: &AppState,
+    agent_id: &str,
+    message_id: Uuid,
+    human_email: &str,
+    body: &str,
+) -> Result<AgentHumanMessage, ApiError> {
+    let body = normalize_memo_body(body)?;
+    let human_email = normalize_email(human_email);
+    let db = state
+        .db
+        .lock()
+        .map_err(|_| ApiError::internal("sqlite lock poisoned"))?;
+    let changed = db
+        .execute(
+            "UPDATE agent_human_messages \
+             SET body = ?4 \
+             WHERE id = ?1 AND agent_id = ?2 AND human_email = ?3 \
+               AND direction = 'human_to_agent' AND status = 'pending' AND read_at IS NULL",
+            params![message_id.to_string(), agent_id, human_email, body],
+        )
+        .map_err(|err| ApiError::internal(format!("update agent message: {err}")))?;
+    if changed == 0 {
+        return Err(ApiError::bad_request(
+            "agent message cannot be edited after it has been read or resolved",
+        ));
+    }
+    db_get_agent_message_locked(&db, message_id)?
+        .ok_or_else(|| ApiError::internal("updated agent message not found"))
+}
+
 fn db_list_agent_inbox(
     state: &AppState,
     agent_id: &str,
@@ -1445,6 +1476,21 @@ fn insert_agent_message_locked(
     )
     .map_err(|err| ApiError::internal(format!("persist agent message: {err}")))?;
     Ok(())
+}
+
+fn db_get_agent_message_locked(
+    db: &Connection,
+    message_id: Uuid,
+) -> Result<Option<AgentHumanMessage>, ApiError> {
+    db.query_row(
+        "SELECT id, agent_id, human_email, direction, kind, body, status, created_at, resolved_at, read_at \
+         FROM agent_human_messages \
+         WHERE id = ?1",
+        params![message_id.to_string()],
+        agent_message_from_row,
+    )
+    .optional()
+    .map_err(|err| ApiError::internal(format!("read agent message: {err}")))
 }
 
 fn agent_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AgentHumanMessage> {

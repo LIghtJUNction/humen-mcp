@@ -361,6 +361,29 @@ async fn create_agent_ask_me_request(
     Ok(Json(message))
 }
 
+async fn update_agent_human_message(
+    State(state): State<AppState>,
+    Path((id, message_id)): Path<(String, Uuid)>,
+    headers: HeaderMap,
+    Json(payload): Json<AgentPanelMessageUpdate>,
+) -> Result<Json<AgentHumanMessage>, ApiError> {
+    let session = require_session(&state, &headers)?;
+    if !db_agent_exists(&state, &id)? {
+        return Err(ApiError::bad_request("agent not found"));
+    }
+    let message = db_update_agent_message_from_human(
+        &state,
+        &id,
+        message_id,
+        &session.user.email,
+        &payload.body,
+    )?;
+    let _ = state
+        .events
+        .send(ServerEvent::AgentInboxChanged { message: message.clone() });
+    Ok(Json(message))
+}
+
 async fn rate_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,

@@ -1013,6 +1013,11 @@ struct AgentPanelMessageCreate {
 }
 
 #[derive(Debug, Deserialize)]
+struct AgentPanelMessageUpdate {
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AgentFriendRequestArgs {
     #[serde(alias = "email")]
     human_email: String,

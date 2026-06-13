@@ -482,6 +482,19 @@ fn format_weixin_request_notification(
     if !request.steps.is_empty() {
         lines.push(format!("步骤：{}", truncate_text(&request.steps.join("；"), 500)));
     }
+    if let Some(image_url) = request
+        .image_url
+        .as_deref()
+        .and_then(|value| normalize_optional_value(Some(value)))
+    {
+        lines.push(format!("图片：{image_url}"));
+    } else if request
+        .image_base64
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        lines.push("图片：请打开网页处理地址查看；微信通知暂不直接发送内嵌图片。".to_string());
+    }
     let mut sections = vec![lines.join("\n")];
     if let Some(help_prompt) = render_webhook_help_prompt(state, webhook, request) {
         sections.push(help_prompt);

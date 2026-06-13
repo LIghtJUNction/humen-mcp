@@ -1583,8 +1583,11 @@ tags = ["ops", "#cn"]
         assert!(text.contains("Check release"));
 
         webhook.help_prompt = " \n ".to_string();
-        let text = format_weixin_request_notification(&state, &webhook, &request);
+        let mut image_request = request.clone();
+        image_request.image_base64 = Some("aGVsbG8=".to_string());
+        let text = format_weixin_request_notification(&state, &webhook, &image_request);
         assert!(text.contains("标题：Check release"));
+        assert!(text.contains("微信通知暂不直接发送内嵌图片"));
         assert!(!text.contains("打开 http://127.0.0.1:8787/mcp"));
         assert!(!text.contains("定位 "));
     }
@@ -1967,6 +1970,34 @@ tags = ["ops", "#cn"]
         let inbox = db_list_agent_inbox(&state, "agent-1", false, false, 10).unwrap();
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].id, message.id);
+
+        let edited = db_update_agent_message_from_human(
+            &state,
+            "agent-1",
+            message.id,
+            "bob@example.com",
+            "Updated ping.",
+        )
+        .unwrap();
+        assert_eq!(edited.body, "Updated ping.");
+        assert_eq!(edited.read_at, None);
+
+        let read_inbox = db_list_agent_inbox(&state, "agent-1", false, true, 10).unwrap();
+        assert_eq!(read_inbox[0].body, "Updated ping.");
+        assert!(read_inbox[0].read_at.is_some());
+
+        let locked = db_update_agent_message_from_human(
+            &state,
+            "agent-1",
+            message.id,
+            "bob@example.com",
+            "Too late.",
+        )
+        .unwrap_err();
+        assert_eq!(
+            locked.message,
+            "agent message cannot be edited after it has been read or resolved"
+        );
     }
 
     #[test]
